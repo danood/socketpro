@@ -3,23 +3,25 @@ package SPA.ClientSide;
 import SPA.CScopeUQueue;
 
 public class CSocketPool<THandler extends CAsyncServiceHandler> {
-
+    
     private volatile java.lang.reflect.Constructor<THandler> m_AsyncHandlerCtor = null;
-
+    
     public interface DOnSocketPoolEvent {
-
+        
         void invoke(CSocketPool sender, tagSocketPoolEvent spe, CAsyncServiceHandler AsyncServiceHandler);
     }
     public DOnSocketPoolEvent SocketPoolEvent = null;
-
+    
     public interface DDoSslServerAuthentication {
-
+        
         boolean invoke(CSocketPool sender, CClientSocket cs);
     }
     public DDoSslServerAuthentication DoSslServerAuthentication = null;
-
+    
     private THandler m_hFrom = null;
-
+    
+    private String m_qName = "";
+    
     private void invoke(int poolId, int spc, long h) throws InstantiationException, IllegalAccessException, IllegalArgumentException, java.lang.reflect.InvocationTargetException {
         THandler handler = MapToHandler(h);
         tagSocketPoolEvent event = tagSocketPoolEvent.forValue(spc);
@@ -78,13 +80,11 @@ public class CSocketPool<THandler extends CAsyncServiceHandler> {
                     ClientCoreLoader.SetSockOpt(h, SPA.tagSocketOption.soTcpNoDelay.getValue(), 1, SPA.tagSocketLevel.slTcp.getValue());
                     ClientCoreLoader.StartBatching(h);
                     boolean ok = ClientCoreLoader.SwitchTo(h, handler.getSvsID());
-                    if (ok) {
-                        ClientCoreLoader.TurnOnZipAtSvr(h, cs.ConnectionContext.Zip);
-                        ClientCoreLoader.SetSockOptAtSvr(h, SPA.tagSocketOption.soRcvBuf.getValue(), 116800, SPA.tagSocketLevel.slSocket.getValue());
-                        ClientCoreLoader.SetSockOptAtSvr(h, SPA.tagSocketOption.soSndBuf.getValue(), 116800, SPA.tagSocketLevel.slSocket.getValue());
-                        ClientCoreLoader.SetSockOptAtSvr(h, SPA.tagSocketOption.soTcpNoDelay.getValue(), 1, SPA.tagSocketLevel.slTcp.getValue());
-                    }
-                    ClientCoreLoader.CommitBatching(h, false);
+                    ok = ClientCoreLoader.TurnOnZipAtSvr(h, cs.ConnectionContext.Zip);
+                    ok = ClientCoreLoader.SetSockOptAtSvr(h, SPA.tagSocketOption.soRcvBuf.getValue(), 116800, SPA.tagSocketLevel.slSocket.getValue());
+                    ok = ClientCoreLoader.SetSockOptAtSvr(h, SPA.tagSocketOption.soSndBuf.getValue(), 116800, SPA.tagSocketLevel.slSocket.getValue());
+                    ok = ClientCoreLoader.SetSockOptAtSvr(h, SPA.tagSocketOption.soTcpNoDelay.getValue(), 1, SPA.tagSocketLevel.slTcp.getValue());
+                    ok = ClientCoreLoader.CommitBatching(h, false);
                 }
                 break;
             case speQueueMergedFrom:
@@ -99,19 +99,25 @@ public class CSocketPool<THandler extends CAsyncServiceHandler> {
             default:
                 break;
         }
+        if (SocketPoolEvent != null) {
+            SocketPoolEvent.invoke(this, event, handler);
+        }
         OnSocketPoolEvent(event, handler);
+        if (event == tagSocketPoolEvent.speConnected && handler.getAttachedClientSocket().getConnected()) {
+            SetQueue(handler.getAttachedClientSocket());
+        }
     }
-
+    
     protected void OnSocketPoolEvent(tagSocketPoolEvent spe, THandler h) {
-
+        
     }
-
+    
     @Override
     protected void finalize() throws Throwable {
         Clean();
         super.finalize();
     }
-
+    
     void Clean() {
         int poolId = 0;
         synchronized (m_cs) {
@@ -122,7 +128,7 @@ public class CSocketPool<THandler extends CAsyncServiceHandler> {
             ClientCoreLoader.DestroySocketPool(poolId);
         }
     }
-
+    
     public final boolean DisconnectAll() {
         int poolId;
         synchronized (m_cs) {
@@ -133,29 +139,29 @@ public class CSocketPool<THandler extends CAsyncServiceHandler> {
         }
         return true;
     }
-
+    
     public final boolean getStarted() {
         synchronized (m_cs) {
             return (ClientCoreLoader.GetThreadCount(m_nPoolId) != 0);
         }
     }
-
+    
     public final boolean getAvg() {
         synchronized (m_cs) {
             return ClientCoreLoader.IsAvg(m_nPoolId);
         }
     }
-
+    
     public static int getSocketPools() {
         return ClientCoreLoader.GetNumberOfSocketPools();
     }
-
+    
     public final int getPoolId() {
         synchronized (m_cs) {
             return m_nPoolId;
         }
     }
-
+    
     public final boolean getQueueAutoMerge() {
         synchronized (m_cs) {
             return ClientCoreLoader.GetQueueAutoMergeByPool(m_nPoolId);
@@ -174,41 +180,41 @@ public class CSocketPool<THandler extends CAsyncServiceHandler> {
             ClientCoreLoader.SetQueueAutoMergeByPool(m_nPoolId, merge);
         }
     }
-
+    
     public final void ShutdownPool() {
         Clean();
     }
-
+    
     public final int getThreadsCreated() {
         synchronized (m_cs) {
             return ClientCoreLoader.GetThreadCount(m_nPoolId);
         }
     }
-
+    
     public final int getDisconnectedSockets() {
         synchronized (m_cs) {
             return ClientCoreLoader.GetDisconnectedSockets(m_nPoolId);
         }
     }
-
+    
     public final int getSocketsPerThread() {
         synchronized (m_cs) {
             return ClientCoreLoader.GetSocketsPerThread(m_nPoolId);
         }
     }
-
+    
     public final int getLockedSockets() {
         synchronized (m_cs) {
             return ClientCoreLoader.GetLockedSockets(m_nPoolId);
         }
     }
-
+    
     public final int getIdleSockets() {
         synchronized (m_cs) {
             return ClientCoreLoader.GetIdleSockets(m_nPoolId);
         }
     }
-
+    
     public final int getConnectedSockets() {
         synchronized (m_cs) {
             return ClientCoreLoader.GetConnectedSockets(m_nPoolId);
@@ -302,9 +308,9 @@ public class CSocketPool<THandler extends CAsyncServiceHandler> {
         } catch (NoSuchMethodException | SecurityException err) {
         }
     }
-
+    
     private CConnectionContext[][] m_mcc;
-
+    
     private void CopyCC(CConnectionContext[][] cc) {
         int threads = cc.length;
         int socketsPerThread = cc[0].length;
@@ -333,7 +339,71 @@ public class CSocketPool<THandler extends CAsyncServiceHandler> {
             }
         }
     }
-
+    
+    public String getQueueName() {
+        synchronized (m_cs) {
+            return m_qName;
+        }
+    }
+    
+    public void setQueueName(String qName) {
+        String s = qName;
+        if (s != null) {
+            s = s.trim();
+        } else {
+            s = "";
+        }
+        if (SPA.CUQueue.DEFAULT_OS == SPA.tagOperationSystem.osWin || SPA.CUQueue.DEFAULT_OS == SPA.tagOperationSystem.osWinCE) {
+            s = s.toLowerCase();
+        }
+        synchronized (m_cs) {
+            if (!m_qName.equals(s)) {
+                StopPoolQueue();
+                m_qName = s;
+                if (m_qName.length() > 0) {
+                    StartPoolQueue(m_qName);
+                }
+            }
+        }
+    }
+    
+    private void StopPoolQueue() {
+        for (CClientSocket cs : m_dicSocketHandler.keySet()) {
+            if (cs.getClientQueue() != null && cs.getClientQueue().getAvailable()) {
+                cs.getClientQueue().StopQueue();
+            }
+        }
+    }
+    
+    private static final int DEFAULT_QUEUE_TIME_TO_LIVE = 240 * 3600;
+    
+    private void StartPoolQueue(String qName) {
+        int index = 0;
+        for (CClientSocket cs : m_dicSocketHandler.keySet()) {
+            final boolean ok = cs.getClientQueue().StartQueue(qName + index, DEFAULT_QUEUE_TIME_TO_LIVE, cs.getEncryptionMethod() != SPA.tagEncryptionMethod.NoEncryption);
+            ++index;
+        }
+    }
+    
+    private void SetQueue(CClientSocket socket) {
+        int index = 0;
+        for (CClientSocket cs : m_dicSocketHandler.keySet()) {
+            if (cs == socket) {
+                if (m_qName.length() > 0) {
+                    if (!cs.getClientQueue().getAvailable()) {
+                        cs.getClientQueue().StartQueue(m_qName + index, DEFAULT_QUEUE_TIME_TO_LIVE, cs.getEncryptionMethod() != SPA.tagEncryptionMethod.NoEncryption);
+                    }
+                } else {
+                    if (cs.getClientQueue().getAvailable()) {
+                        cs.getClientQueue().StopQueue();
+                    }
+                }
+                break;
+            }
+            ++index;
+        }
+    }
+    
     private THandler MapToHandler(long h) {
         synchronized (m_cs) {
             for (CClientSocket cs : m_dicSocketHandler.keySet()) {
@@ -476,7 +546,7 @@ public class CSocketPool<THandler extends CAsyncServiceHandler> {
         if (!StartSocketPool((int) socketsPerThread, (int) threads, avg, ta.getValue())) {
             return false;
         }
-
+        
         synchronized (m_cs) {
             int index = 0;
             for (CClientSocket cs : m_dicSocketHandler.keySet()) {
@@ -498,7 +568,7 @@ public class CSocketPool<THandler extends CAsyncServiceHandler> {
                 ++index;
             }
         }
-
+        
         for (CClientSocket cs : temp.keySet()) {
             if (cs.getConnected()) {
                 first = false;
@@ -521,7 +591,7 @@ public class CSocketPool<THandler extends CAsyncServiceHandler> {
         }
         return (getConnectedSockets() > 0);
     }
-
+    
     private boolean StartSocketPool(int socketsPerThread, int threads, boolean avg, int ta) {
         if (getStarted()) {
             return true;
@@ -529,9 +599,9 @@ public class CSocketPool<THandler extends CAsyncServiceHandler> {
         int id = ClientCoreLoader.CreateSocketPool(this, socketsPerThread, threads, avg, ta);
         return (id != 0);
     }
-
+    
     private volatile THandler[] m_Handlers = null;
-
+    
     @SuppressWarnings("unchecked")
     public final THandler[] getAsyncHandlers() {
         synchronized (m_cs) {
@@ -551,7 +621,7 @@ public class CSocketPool<THandler extends CAsyncServiceHandler> {
             return m_Handlers;
         }
     }
-
+    
     public final CClientSocket[] getSockets() {
         synchronized (m_cs) {
             int n = 0;
@@ -598,7 +668,7 @@ public class CSocketPool<THandler extends CAsyncServiceHandler> {
                     rawName = queueName + "_" + appName + "_0.mqc";
                 }
                 String queueFileName = cs.getClientQueue().getQueueFileName();
-
+                
                 int len = queueFileName.length();
                 int lenRaw = rawName.length();
                 if (lenRaw > len) {
@@ -619,7 +689,7 @@ public class CSocketPool<THandler extends CAsyncServiceHandler> {
         }
         return h;
     }
-
+    
     public final int getQueues() {
         int q = 0;
         synchronized (m_cs) {
@@ -665,23 +735,24 @@ public class CSocketPool<THandler extends CAsyncServiceHandler> {
      * Seek an async handler on the min number of requests queued and its
      * associated socket connection
      *
-     * @return An async handler if found; and null or nothing if no queue is
-     * available
+     * @return An async handler if found; and null or nothing if no proper queue
+     * is available
      */
     public final THandler SeekByQueue() {
         THandler h = null;
         synchronized (m_cs) {
             boolean automerge = ClientCoreLoader.GetQueueAutoMergeByPool(m_nPoolId);
             for (CClientSocket cs : m_dicSocketHandler.keySet()) {
-                if (automerge && h != null && !cs.getConnected()) {
+                if (automerge && cs.getConnectionState().getValue() < tagConnectionState.csSwitched.getValue()) {
                     continue;
                 }
-                if (!cs.getClientQueue().getAvailable()) {
+                IClientQueue cq = cs.getClientQueue();
+                if (!cq.getAvailable() || cq.getJobSize() > 0/*queue is in transaction at this time*/) {
                     continue;
                 }
                 if (h == null) {
                     h = m_dicSocketHandler.get(cs);
-                } else if ((cs.getClientQueue().getMessageCount() < h.getAttachedClientSocket().getClientQueue().getMessageCount()) || (cs.getConnected() && !h.getAttachedClientSocket().getConnected())) {
+                } else if ((cq.getMessageCount() < h.getAttachedClientSocket().getClientQueue().getMessageCount()) || (cs.getConnected() && !h.getAttachedClientSocket().getConnected())) {
                     h = m_dicSocketHandler.get(cs);
                 }
             }
@@ -772,7 +843,7 @@ public class CSocketPool<THandler extends CAsyncServiceHandler> {
         }
         ClientCoreLoader.UnlockASocket(poolId, cs.getHandle());
     }
-
+    
     private volatile int m_nPoolId; //locked by m_cs
     private volatile boolean m_autoConn = true;
     private volatile int m_recvTimeout = CClientSocket.DEFAULT_RECV_TIMEOUT;

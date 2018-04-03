@@ -10,11 +10,14 @@ public class CConfig
     public string m_master_default_db = "";
     public uint m_nMasterSessions = 2;
     public SocketProAdapter.ClientSide.CConnectionContext m_ccMaster = new SocketProAdapter.ClientSide.CConnectionContext();
+    public string m_master_queue_name = "";
 
     //slave
     public string m_slave_default_db = "";
-    public uint m_nSlaveSessions = 0;
+    public uint m_slave_threads = 1;
+    public uint m_sessions_per_host = 2;
     public List<SocketProAdapter.ClientSide.CConnectionContext> m_vccSlave = new List<SocketProAdapter.ClientSide.CConnectionContext>();
+    public string m_slave_queue_name = "";
 
     //middle tier server
     public byte m_main_threads = 1;
@@ -63,6 +66,7 @@ public class CConfig
         m_config.m_slave_default_db = "sakila";
         cc.Port = 20902;
 #endif
+        m_config.m_slave_queue_name = "db_sakila";
         cc.Host = "104.154.160.127";
         cc.UserId = "root";
         cc.Password = "Smash123";
@@ -70,7 +74,9 @@ public class CConfig
 
         //treat master as last salve
         m_config.m_vccSlave.Add(m_config.m_ccMaster);
-        m_config.m_nSlaveSessions = 4;
+        
+        m_config.m_slave_threads = 2;
+        m_config.m_sessions_per_host = 3;
 
         //middle tier
         //test certificate and private key files are located at the directory ../socketpro/bin

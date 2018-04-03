@@ -24,7 +24,6 @@ class CYourServer(CSocketProServer):
     def Run(self, port, maxBacklog, v6Supported):
         mapIdMethod = {
             idGetMasterSlaveConnectedSessions: 'GetMasterSlaveConnectedSessions',
-            idGetRentalDateTimes: ['GetRentalDateTimes', True],  # or ('GetRentalDateTimes', True)
             DB_CONSTS.idGetCachedTables: ('GetCachedTables', True)  # True -- slow request
         }
         self.YourPeerService = CSocketProService(CYourPeer, sidStreamSystem, mapIdMethod)
@@ -50,6 +49,8 @@ class CYourServer(CSocketProServer):
     def StartMySQLPools():
         config = CConfig.getConfig()
         CYourPeer.Master = CMaster(CSqlite, config.m_master_default_db, True)
+        if len(config.m_master_queue_name) > 0:
+            CYourPeer.Master.QueueName = config.m_master_queue_name
 
         # These case-sensitivities depends on your DB running platform and sensitivity settings.
         # All of them are false or case-insensitive by default
@@ -60,16 +61,22 @@ class CYourServer(CSocketProServer):
         ok = CYourPeer.Master.StartSocketPool(config.m_ccMaster, config.m_nMasterSessions, 1)  # one thread enough
 
         # compute threads and sockets_per_thread
-        sockets_per_thread = len(config.m_vccSlave)
-        threads = int(config.m_nSlaveSessions / sockets_per_thread)
+        sockets_per_thread = config.m_sessions_per_host * len(config.m_vccSlave)
+        threads = config.m_slave_threads
 
         CYourPeer.Slave = CMaster.CSlavePool(CSqlite, config.m_slave_default_db)
+        if len(config.m_slave_queue_name) > 0:
+            CYourPeer.Slave.QueueName = config.m_slave_queue_name
+        # create a two-dimension matrix that contains connection contexts
         mcc = [[0 for i in range(sockets_per_thread)] for i in range(threads)]
-        while threads >= 0:
+        while threads > 0:
             threads -= 1
             j = 0
             for cc in config.m_vccSlave:
-                mcc[threads][j] = cc
+                sessions = config.m_sessions_per_host
+                while sessions > 0:
+                    sessions -= 1
+                    mcc[threads][j * config.m_sessions_per_host + sessions] = cc
                 j += 1
         ok = CYourPeer.Slave.StartSocketPoolEx(mcc)
 

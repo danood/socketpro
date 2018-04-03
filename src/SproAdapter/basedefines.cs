@@ -515,6 +515,18 @@ namespace SocketProAdapter
                 V6 = v6;
             }
 
+            public CConnectionContext(string host, uint port, string userId, string password, tagEncryptionMethod em, bool zip, bool v6, object anyData)
+            {
+                Host = host;
+                Port = port;
+                UserId = userId;
+                m_Password = password;
+                EncrytionMethod = em;
+                Zip = zip;
+                V6 = v6;
+                AnyData = anyData;
+            }
+
             public string Password
             {
                 set
@@ -535,6 +547,7 @@ namespace SocketProAdapter
             public tagEncryptionMethod EncrytionMethod;
             public bool Zip = false;
             public bool V6 = false;
+            public object AnyData = null;
         }
 
         public struct CMessageSender

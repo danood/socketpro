@@ -7,10 +7,6 @@ std::shared_ptr<CMySQLMasterPool> CYourServer::Master;
 std::shared_ptr<CMySQLSlavePool> CYourServer::Slave;
 
 void CYourServer::StartMySQLPools() {
-    assert(g_config.m_vccSlave.size());
-    assert(g_config.m_nSlaveSessions);
-    assert((g_config.m_nSlaveSessions % g_config.m_vccSlave.size()) == 0);
-
     CYourServer::Master.reset(new CMySQLMasterPool(g_config.m_master_default_db.c_str()));
 
     //These case-sensitivities depends on your DB running platform and sensitivity settings.
@@ -19,12 +15,14 @@ void CYourServer::StartMySQLPools() {
     CYourServer::Master->Cache.SetTableNameCaseSensitive(false);
     CYourServer::Master->Cache.SetDBNameCaseSensitive(false);
 
+    if (g_config.m_master_queue_name.size())
+        CYourServer::Master->SetQueueName(g_config.m_master_queue_name.c_str());
     //start master pool for cache and update accessing
     bool ok = CYourServer::Master->StartSocketPool(g_config.m_ccMaster, (unsigned int) g_config.m_nMasterSessions, 1); //one thread enough
 
     //compute threads and sockets_per_thread
-    unsigned int threads = (unsigned int) (g_config.m_nSlaveSessions / g_config.m_vccSlave.size());
-    unsigned int sockets_per_thread = (unsigned int) g_config.m_vccSlave.size();
+    unsigned int threads = (unsigned int) g_config.m_slave_threads;
+    unsigned int sockets_per_thread = (unsigned int) (g_config.m_vccSlave.size() * g_config.m_sessions_per_host);
     CYourServer::Slave.reset(new CMySQLSlavePool(g_config.m_slave_default_db.c_str()));
 
     typedef SPA::ClientSide::CConnectionContext* PCConnectionContext;
@@ -34,10 +32,15 @@ void CYourServer::StartMySQLPools() {
     for (unsigned int t = 0; t < threads; ++t) {
         SPA::ClientSide::CConnectionContext *pcc = new SPA::ClientSide::CConnectionContext[sockets_per_thread];
         ppCCs[t] = pcc;
-        for (unsigned int s = 0; s < sockets_per_thread; ++s) {
-            pcc[s] = g_config.m_vccSlave[s];
+        for (unsigned int j = 0; j < g_config.m_vccSlave.size(); ++j) {
+            for (unsigned int n = 0; n < g_config.m_sessions_per_host; ++n) {
+                pcc[j * g_config.m_sessions_per_host + n] = g_config.m_vccSlave[j];
+            }
         }
     }
+
+    if (g_config.m_slave_queue_name.size())
+        CYourServer::Slave->SetQueueName(g_config.m_slave_queue_name.c_str());
     //start slave pool for query accessing
     ok = CYourServer::Slave->StartSocketPool(ppCCs, threads, sockets_per_thread);
 
@@ -78,9 +81,8 @@ bool CYourServer::AddServices() {
     if (!ok)
         return false;
     ok = m_SSPeer.AddSlowRequest(SPA::UDB::idGetCachedTables);
-    ok = m_SSPeer.AddSlowRequest(idGetRentalDateTimes);
 
-    //tell caller that all results could be returned randomly (not in order)
+    //tell this service that all results could be returned randomly (not in order)
     m_SSPeer.SetReturnRandom(true);
     return true;
 }

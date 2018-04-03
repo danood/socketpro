@@ -10,11 +10,14 @@ public class CConfig {
     public String m_master_default_db = "";
     public int m_nMasterSessions = 2;
     public CConnectionContext m_ccMaster = new CConnectionContext();
+    public String m_master_queue_name = "";
 
     //slave
     public String m_slave_default_db = "";
-    public int m_nSlaveSessions = 0;
     public ArrayList<CConnectionContext> m_vccSlave = new ArrayList<>();
+    public String m_slave_queue_name = "";
+    public int m_slave_threads = 1;
+    public int m_sessions_per_host = 2;
 
     //middle tier server
     public byte m_main_threads = 1;
@@ -41,23 +44,17 @@ public class CConfig {
         m_config = new CConfig();
 
         //load the following settings from a configuration file
-        if (SPA.CUQueue.DEFAULT_OS == SPA.tagOperationSystem.osWin) {
-            //m_main_threads would be 1 for windows platforms if you use OnFastRequestArrive.
-            //Otherwise, random responses may be lost for a unknown reason. This is a known flaw for window platforms
-            m_config.m_main_threads = 4;
-        } else {
-            m_config.m_main_threads = 4;
-        }
+        m_config.m_main_threads = 4;
 
         //master
         m_config.m_ccMaster.Port = 20901;
         m_config.m_master_default_db = "sakila.db";
-        m_config.m_nMasterSessions = 1; //one session enough
-
+        m_config.m_nMasterSessions = 1; //one session for SQLite
         //MySQL plugin
         //m_config.m_ccMaster.Port = 20902;
         //m_config.m_master_default_db = "sakila";
         //m_config.m_nMasterSessions = 2; //two sessions enough
+        
         m_config.m_ccMaster.Host = "localhost";
         m_config.m_ccMaster.UserId = "root";
         m_config.m_ccMaster.Password = "Smash123";
@@ -65,6 +62,8 @@ public class CConfig {
         m_config.m_slave_default_db = "sakila.db";
         //MySQL plugin
         //m_config.m_slave_default_db = "sakila";
+        
+        m_config.m_slave_queue_name = "db_sakila";
 
         CConnectionContext cc = new CConnectionContext();
         cc.Host = "104.154.160.127";
@@ -75,7 +74,9 @@ public class CConfig {
 
         //treat master as last salve
         m_config.m_vccSlave.add(m_config.m_ccMaster);
-        m_config.m_nSlaveSessions = 4;
+
+        m_config.m_sessions_per_host = 3;
+        m_config.m_slave_threads = 2;
 
         //middle tier
         //test certificate and private key files are located at the directory ../socketpro/bin
