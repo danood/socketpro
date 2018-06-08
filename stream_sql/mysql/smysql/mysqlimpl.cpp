@@ -50,8 +50,8 @@ namespace SPA
 
         CMysqlImpl::CMysqlImpl()
         : m_EnableMessages(false), m_oks(0), m_fails(0), m_ti(tiUnspecified),
-        m_qSend(*m_sb), m_stmt(0, false), m_bExecutingParameters(false), m_NoSending(false), m_sql_errno(0),
-        m_sc(nullptr), m_sql_resultcs(nullptr), m_ColIndex(0), m_sql_flags(0), m_affected_rows(0),
+        m_bManual(false), m_qSend(*m_sb), m_NoSending(false), m_sql_errno(0),
+        m_sql_resultcs(nullptr), m_ColIndex(0), m_sql_flags(0), m_affected_rows(0),
         m_last_insert_id(0), m_server_status(0), m_statement_warn_count(0), m_indexCall(0),
         m_bBlob(false), m_cmd(COM_SLEEP), m_NoRowset(false) {
             m_qSend.ToUtf8(true); //convert UNICODE into UTF8 automatically
@@ -90,6 +90,7 @@ namespace SPA
             m_oks = 0;
             m_fails = 0;
             m_ti = tiUnspecified;
+            m_bManual = false;
         }
 
         void CMysqlImpl::OnFastRequestArrive(unsigned short reqId, unsigned int len) {
@@ -719,8 +720,6 @@ namespace SPA
             impl->m_statement_warn_count = statement_warn_count;
             impl->m_affected_rows += affected_rows;
             impl->m_last_insert_id = last_insert_id;
-            if (!impl->m_bExecutingParameters)
-                ++impl->m_oks;
             if (message)
                 impl->m_err_msg = SPA::Utilities::ToWide(message);
             else
@@ -731,7 +730,6 @@ namespace SPA
             CMysqlImpl *impl = (CMysqlImpl *) ctx;
             if (!impl)
                 return;
-            ++impl->m_fails;
             impl->m_sql_errno = (int) sql_errno;
             impl->m_err_msg = SPA::Utilities::ToWide(err_msg);
             if (sqlstate)
@@ -750,17 +748,12 @@ namespace SPA
                 return false;
             m_pMysql.reset(st_session, [](MYSQL_SESSION mysql) {
                 if (mysql) {
-                    int fail = srv_session_detach(mysql);
-                    //assert(!fail);
-                    fail = srv_session_close(mysql);
+                    int fail = srv_session_close(mysql);
                     assert(!fail);
                 }
             });
-            int fail = srv_session_info_set_connection_type(st_session, VIO_TYPE_PLUGIN);
-            assert(!fail);
-            if (fail)
-                return false;
-            fail = thd_get_security_context(srv_session_info_get_thd(st_session), &m_sc);
+            MYSQL_SECURITY_CONTEXT sc = nullptr;
+            int fail = thd_get_security_context(srv_session_info_get_thd(st_session), &sc);
             assert(!fail);
             if (fail)
                 return false;
@@ -768,7 +761,7 @@ namespace SPA
             std::string host = "localhost";
             if (ip != host)
                 host = "%";
-            fail = security_context_lookup(m_sc, userA.c_str(), host.c_str(), ip.c_str(), nullptr);
+            fail = security_context_lookup(sc, userA.c_str(), host.c_str(), ip.c_str(), nullptr);
             if (fail) {
                 CSetGlobals::Globals.LogMsg(__FILE__, __LINE__, "looking up security context failed(user_id=%s; ip_address==%s)", userA.c_str(), ip.c_str());
                 return false;
@@ -1090,19 +1083,19 @@ namespace SPA
                 assert(!fail);
                 m_stmt.m_pParam.reset();
             }
-            m_stmt.stmt_id = (~0);
+            m_stmt.stmt_id = 0;
         }
 
         void CMysqlImpl::CleanDBObjects() {
             CloseStmt();
             m_pMysql.reset();
-            m_stmt.stmt_id = 0;
             m_vParam.clear();
             ResetMemories();
+            m_bManual = false;
+            m_ti = tiUnspecified;
         }
 
         void CMysqlImpl::OnBaseRequestArrive(unsigned short requestId) {
-            m_bExecutingParameters = false;
             switch (requestId) {
                 case idCancel:
 #ifndef NDEBUG
@@ -1121,7 +1114,7 @@ namespace SPA
 
         void CMysqlImpl::BeginTrans(int isolation, const std::wstring &dbConn, unsigned int flags, int &res, std::wstring &errMsg, int &ms) {
             ms = msMysql;
-            if (m_ti != tiUnspecified || isolation == (int) tiUnspecified) {
+            if (m_bManual) {
                 errMsg = BAD_MANUAL_TRANSACTION_STATE;
                 res = SPA::Mysql::ER_BAD_MANUAL_TRANSACTION_STATE;
                 return;
@@ -1131,8 +1124,9 @@ namespace SPA
                 if (!m_pMysql) {
                     return;
                 }
-            } else {
-                std::string sql;
+            }
+            std::string sql;
+            if ((int) m_ti != isolation) {
                 switch ((tagTransactionIsolation) isolation) {
                     case tiReadUncommited:
                         sql = "SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED";
@@ -1147,35 +1141,37 @@ namespace SPA
                         sql = "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE";
                         break;
                     default:
-                        break;
+                        errMsg = BAD_MANUAL_TRANSACTION_STATE;
+                        res = SPA::Mysql::ER_BAD_MANUAL_TRANSACTION_STATE;
+                        return;
                 }
-                if (sql.size())
-                    sql += ";";
-                sql += "SET AUTOCOMMIT=0;START TRANSACTION";
-                COM_DATA cmd;
-                ::memset(&cmd, 0, sizeof (cmd));
-                InitMysqlSession();
-                cmd.com_query.query = sql.c_str();
-                cmd.com_query.length = (unsigned int) sql.size();
-                m_cmd = COM_QUERY;
-                int fail = command_service_run_command(m_pMysql.get(), COM_QUERY, &cmd, &my_charset_utf8_general_ci, &m_sql_cbs, CS_BINARY_REPRESENTATION, this);
-                if (m_sql_errno) {
-                    res = m_sql_errno;
-                    errMsg = m_err_msg;
-                } else if (fail) {
-                    errMsg = SERVICE_COMMAND_ERROR;
-                    res = SPA::Mysql::ER_SERVICE_COMMAND_ERROR;
-                } else {
-                    res = 0;
-                    m_fails = 0;
-                    m_oks = 0;
-                    m_ti = (tagTransactionIsolation) isolation;
-                }
+                sql += ";";
+            }
+            sql += "START TRANSACTION";
+            COM_DATA cmd;
+            ::memset(&cmd, 0, sizeof (cmd));
+            InitMysqlSession();
+            cmd.com_query.query = sql.c_str();
+            cmd.com_query.length = (unsigned int) sql.size();
+            m_cmd = COM_QUERY;
+            int fail = command_service_run_command(m_pMysql.get(), COM_QUERY, &cmd, &my_charset_utf8_general_ci, &m_sql_cbs, CS_BINARY_REPRESENTATION, this);
+            if (m_sql_errno) {
+                res = m_sql_errno;
+                errMsg = m_err_msg;
+            } else if (fail) {
+                errMsg = SERVICE_COMMAND_ERROR;
+                res = SPA::Mysql::ER_SERVICE_COMMAND_ERROR;
+            } else {
+                res = 0;
+                m_fails = 0;
+                m_oks = 0;
+                m_ti = (tagTransactionIsolation) isolation;
+                m_bManual = true;
             }
         }
 
         void CMysqlImpl::EndTrans(int plan, int &res, std::wstring & errMsg) {
-            if (m_ti == tiUnspecified) {
+            if (!m_bManual) {
                 errMsg = BAD_MANUAL_TRANSACTION_STATE;
                 res = SPA::Mysql::ER_BAD_MANUAL_TRANSACTION_STATE;
                 return;
@@ -1216,7 +1212,6 @@ namespace SPA
                     break;
             }
             std::string sql(rollback ? "ROLLBACK" : "COMMIT");
-            sql += ";SET AUTOCOMMIT=1";
             COM_DATA cmd;
             ::memset(&cmd, 0, sizeof (cmd));
             InitMysqlSession();
@@ -1232,11 +1227,10 @@ namespace SPA
                 res = SPA::Mysql::ER_SERVICE_COMMAND_ERROR;
             } else {
                 res = 0;
-                m_ti = tiUnspecified;
                 m_fails = 0;
                 m_oks = 0;
             }
-
+            m_bManual = false;
         }
 
         bool CMysqlImpl::SendRows(CUQueue& sb, bool transferring) {
@@ -1370,6 +1364,7 @@ namespace SPA
                 errMsg = m_err_msg;
                 affected = 0;
                 vtId = (SPA::UINT64)m_last_insert_id;
+                ++m_fails;
             } else if (fail) {
                 errMsg = SERVICE_COMMAND_ERROR;
                 res = SPA::Mysql::ER_SERVICE_COMMAND_ERROR;
@@ -1378,6 +1373,7 @@ namespace SPA
                 affected = (SPA::INT64) m_affected_rows;
                 if (lastInsertId)
                     vtId = (SPA::UINT64)m_last_insert_id;
+                ++m_oks;
             }
             fail_ok = ((m_fails - fails) << 32);
             fail_ok += (unsigned int) (m_oks - oks);
@@ -1415,7 +1411,7 @@ namespace SPA
                 res = SPA::Mysql::ER_SERVICE_COMMAND_ERROR;
             } else {
                 parameters = (unsigned int) m_stmt.parameters;
-                if (parameters == 0) {
+                if (parameters == 0 || m_stmt.stmt_id == 0) {
                     res = SPA::Mysql::ER_NO_PARAMETER_SPECIFIED;
                     errMsg = NO_PARAMETER_SPECIFIED;
                     CloseStmt();
@@ -1447,7 +1443,6 @@ namespace SPA
 
         int CMysqlImpl::SetParams(int row, std::wstring & errMsg) {
             int res = 0;
-            errMsg.clear();
             PS_PARAM *pParam = m_stmt.m_pParam.get();
             for (size_t n = 0; n < m_stmt.parameters; ++n, ++pParam) {
                 pParam->null_bit = false;
@@ -1555,7 +1550,7 @@ namespace SPA
                         break;
                     default:
                         assert(false); //not implemented
-                        if (!res) {
+                        if (!res && !errMsg.size()) {
                             res = SPA::Mysql::ER_DATA_TYPE_NOT_SUPPORTED;
                             errMsg = DATA_TYPE_NOT_SUPPORTED;
                         }
@@ -1589,7 +1584,7 @@ namespace SPA
                 res = SPA::Mysql::ER_BAD_PARAMETER_DATA_ARRAY_SIZE;
                 errMsg = BAD_PARAMETER_DATA_ARRAY_SIZE;
                 m_fails += (m_vParam.size() / m_stmt.parameters);
-                fail_ok = 1;
+                fail_ok = (m_vParam.size() / m_stmt.parameters);
                 fail_ok <<= 32;
                 return;
             }
@@ -1597,11 +1592,10 @@ namespace SPA
                 res = SPA::Mysql::ER_NO_DB_OPENED_YET;
                 errMsg = NO_DB_OPENED_YET;
                 m_fails += (m_vParam.size() / m_stmt.parameters);
-                fail_ok = 1;
+                fail_ok = (m_vParam.size() / m_stmt.parameters);
                 fail_ok <<= 32;
                 return;
             }
-            m_bExecutingParameters = true;
             fail_ok = 0;
             res = 0;
             UINT64 fails = m_fails;
@@ -1615,6 +1609,7 @@ namespace SPA
                 if (ret) {
                     if (!res)
                         res = ret;
+                    ++m_fails;
                     continue;
                 }
                 cmd.com_stmt_execute.stmt_id = m_stmt.stmt_id;
@@ -1626,13 +1621,13 @@ namespace SPA
                 m_cmd = COM_STMT_EXECUTE;
                 int fail = command_service_run_command(m_pMysql.get(), COM_STMT_EXECUTE, &cmd, &my_charset_utf8_general_ci, &m_sql_cbs, CS_BINARY_REPRESENTATION, this);
                 if (m_sql_errno) {
-                    ++m_fails;
                     if (!res) {
                         res = m_sql_errno;
                         errMsg = m_err_msg;
                     }
                     if (m_last_insert_id && lastInsertId)
                         vtId = (SPA::UINT64)m_last_insert_id;
+                    ++m_fails;
                 } else if (fail) {
                     if (!res) {
                         errMsg = SERVICE_COMMAND_ERROR;
@@ -1649,7 +1644,6 @@ namespace SPA
                     }
                 }
             }
-            m_bExecutingParameters = false;
             fail_ok = ((m_fails - fails) << 32);
             fail_ok += (unsigned int) (m_oks - oks);
         }

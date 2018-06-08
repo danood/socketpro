@@ -38,7 +38,7 @@ namespace SPA {
 
             struct Stmt {
 
-                Stmt(unsigned long id, bool ok, size_t params = 0) : stmt_id(id), parameters(params) {
+                Stmt() : stmt_id(0), parameters(0) {
                 }
                 unsigned long stmt_id;
                 size_t parameters;
@@ -125,14 +125,13 @@ namespace SPA {
             static void ToDecimal(const decimal_t &src, bool large, DECIMAL &dec);
             static bool DoAuthentication(const wchar_t *password, const std::string &hash);
 
-        protected:
+        private:
             bool m_EnableMessages;
             UINT64 m_oks;
             UINT64 m_fails;
             tagTransactionIsolation m_ti;
+            bool m_bManual;
             CDBVariantArray m_vParam;
-
-        private:
             SPA::CScopeUQueue m_sb;
             CUQueue &m_qSend;
 
@@ -141,14 +140,12 @@ namespace SPA {
 
             //parameterized statement
             Stmt m_stmt;
-            bool m_bExecutingParameters;
 
             CDBColumnInfoArray m_vColInfo;
             bool m_NoSending;
 
             int m_sql_errno;
             std::wstring m_err_msg;
-            MYSQL_SECURITY_CONTEXT m_sc;
 
             const CHARSET_INFO *m_sql_resultcs;
             unsigned int m_ColIndex;
