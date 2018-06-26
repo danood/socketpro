@@ -293,6 +293,10 @@ namespace SocketProAdapter {
 
             public const ushort idGetCachedTables = idCallReturn + 1;
 
+            public const ushort idSqlBatchHeader = idGetCachedTables + 1;
+            public const ushort idExecuteBatch = idSqlBatchHeader + 1;
+            public const ushort idParameterPosition = idExecuteBatch + 1;
+
             /// <summary>
             /// Whenever a data size in bytes is about twice larger than the defined value,
             /// the data will be treated in large object and transferred in chunks for reducing memory foot print
@@ -348,6 +352,7 @@ namespace SocketProAdapter {
             protected ushort m_lastReqId = 0;
             protected Dictionary<ulong, KeyValuePair<DRowsetHeader, DRows>> m_mapRowset = new Dictionary<ulong, KeyValuePair<DRowsetHeader, DRows>>();
             private Dictionary<ulong, CDBVariantArray> m_mapParameterCall = new Dictionary<ulong, CDBVariantArray>();
+            private Dictionary<ulong, DRowsetHeader> m_mapHandler = new Dictionary<ulong, DRowsetHeader>();
             private ulong m_indexRowset = 0;
             private CUQueue m_Blob = new CUQueue();
             private CDBVariantArray m_vData = new CDBVariantArray();
@@ -358,6 +363,7 @@ namespace SocketProAdapter {
             private uint m_output = 0;
             private bool m_bCallReturn = false;
             private bool m_queueOk = false;
+            private uint m_nParamPos = 0;
             public ushort LastDBRequestId {
                 get {
                     lock (m_csDB) {
@@ -457,6 +463,7 @@ namespace SocketProAdapter {
                 m_strConnection = "";
                 m_mapRowset.Clear();
                 m_mapParameterCall.Clear();
+                m_mapHandler.Clear();
                 m_vColInfo.Clear();
                 m_lastReqId = 0;
                 m_Blob.SetSize(0);
@@ -656,17 +663,20 @@ namespace SocketProAdapter {
                 bool rowset = (rh != null || row != null) ? true : false;
                 if (!rowset)
                     meta = false;
-                ulong callIndex = GetCallIndex();
-                //make sure all parameter data sendings and ExecuteParameters sending as one combination sending
+                bool queueOk = false;
+                //make sure all parameter data sending and ExecuteParameters sending as one combination sending
                 //to avoid possible request sending overlapping within multiple threading environment
                 lock (m_csOneSending) {
-                    bool queueOk = AttachedClientSocket.ClientQueue.StartJob();
-                    if (!SendParametersData(vParam)) {
-                        lock (m_csDB) {
-                            Clean();
+                    if (vParam != null && vParam.Count > 0) {
+                        queueOk = AttachedClientSocket.ClientQueue.StartJob();
+                        if (!SendParametersData(vParam)) {
+                            lock (m_csDB) {
+                                Clean();
+                            }
+                            return false;
                         }
-                        return false;
                     }
+                    ulong callIndex = GetCallIndex();
                     //don't make m_csDB locked across calling SendRequest, which may lead to client dead-lock
                     //in case a client asynchronously sends lots of requests without use of client side queue.
                     lock (m_csDB) {
@@ -707,6 +717,264 @@ namespace SocketProAdapter {
                     return true;
                 }
             }
+
+            /// <summary>
+            /// Execute a batch of SQL statements on one single call
+            /// </summary>
+            /// <param name="isolation">a value for manual transaction isolation. Specifically, there is no manual transaction around the batch SQL statements if it is tiUnspecified</param>
+            /// <param name="sql">a SQL statement having a batch of individual SQL statements</param>
+            /// <returns>true if request is successfully sent or queued; and false if request is NOT successfully sent or queued</returns>
+            public bool ExecuteBatch(tagTransactionIsolation isolation, string sql) {
+                return ExecuteBatch(isolation, sql, new CDBVariantArray(), null, null, null, null, null, tagRollbackPlan.rpDefault, null, ";", true, true);
+            }
+
+            /// <summary>
+            /// Execute a batch of SQL statements on one single call
+            /// </summary>
+            /// <param name="isolation">a value for manual transaction isolation. Specifically, there is no manual transaction around the batch SQL statements if it is tiUnspecified</param>
+            /// <param name="sql">a SQL statement having a batch of individual SQL statements</param>
+            /// <param name="vParam">an array of parameter data which will be bounded to previously prepared parameters. The array size can be 0 if the given batch SQL statement doesn't having any prepared statement</param>
+            /// <returns>true if request is successfully sent or queued; and false if request is NOT successfully sent or queued</returns>
+            public bool ExecuteBatch(tagTransactionIsolation isolation, string sql, CDBVariantArray vParam) {
+                return ExecuteBatch(isolation, sql, vParam, null, null, null, null, null, tagRollbackPlan.rpDefault, null, ";", true, true);
+            }
+
+            /// <summary>
+            /// Execute a batch of SQL statements on one single call
+            /// </summary>
+            /// <param name="isolation">a value for manual transaction isolation. Specifically, there is no manual transaction around the batch SQL statements if it is tiUnspecified</param>
+            /// <param name="sql">a SQL statement having a batch of individual SQL statements</param>
+            /// <param name="vParam">an array of parameter data which will be bounded to previously prepared parameters. The array size can be 0 if the given batch SQL statement doesn't having any prepared statement</param>
+            /// <param name="handler">a callback for tracking final result</param>
+            /// <returns>true if request is successfully sent or queued; and false if request is NOT successfully sent or queued</returns>
+            public bool ExecuteBatch(tagTransactionIsolation isolation, string sql, CDBVariantArray vParam, DExecuteResult handler) {
+                return ExecuteBatch(isolation, sql, vParam, handler, null, null, null, null, tagRollbackPlan.rpDefault, null, ";", true, true);
+            }
+
+            /// <summary>
+            /// Execute a batch of SQL statements on one single call
+            /// </summary>
+            /// <param name="isolation">a value for manual transaction isolation. Specifically, there is no manual transaction around the batch SQL statements if it is tiUnspecified</param>
+            /// <param name="sql">a SQL statement having a batch of individual SQL statements</param>
+            /// <param name="vParam">an array of parameter data which will be bounded to previously prepared parameters. The array size can be 0 if the given batch SQL statement doesn't having any prepared statement</param>
+            /// <param name="handler">a callback for tracking final result</param>
+            /// <param name="row">a callback for receiving records of data</param>
+            /// <returns>true if request is successfully sent or queued; and false if request is NOT successfully sent or queued</returns>
+            public bool ExecuteBatch(tagTransactionIsolation isolation, string sql, CDBVariantArray vParam, DExecuteResult handler, DRows row) {
+                return ExecuteBatch(isolation, sql, vParam, handler, row, null, null, null, tagRollbackPlan.rpDefault, null, ";", true, true);
+            }
+
+            /// <summary>
+            /// Execute a batch of SQL statements on one single call
+            /// </summary>
+            /// <param name="isolation">a value for manual transaction isolation. Specifically, there is no manual transaction around the batch SQL statements if it is tiUnspecified</param>
+            /// <param name="sql">a SQL statement having a batch of individual SQL statements</param>
+            /// <param name="vParam">an array of parameter data which will be bounded to previously prepared parameters. The array size can be 0 if the given batch SQL statement doesn't having any prepared statement</param>
+            /// <param name="handler">a callback for tracking final result</param>
+            /// <param name="row">a callback for receiving records of data</param>
+            /// <param name="rh">a callback for tracking row set of header column informations</param>
+            /// <returns>true if request is successfully sent or queued; and false if request is NOT successfully sent or queued</returns>
+            public bool ExecuteBatch(tagTransactionIsolation isolation, string sql, CDBVariantArray vParam, DExecuteResult handler, DRows row, DRowsetHeader rh) {
+                return ExecuteBatch(isolation, sql, vParam, handler, row, rh, null, null, tagRollbackPlan.rpDefault, null, ";", true, true);
+            }
+
+            /// <summary>
+            /// Execute a batch of SQL statements on one single call
+            /// </summary>
+            /// <param name="isolation">a value for manual transaction isolation. Specifically, there is no manual transaction around the batch SQL statements if it is tiUnspecified</param>
+            /// <param name="sql">a SQL statement having a batch of individual SQL statements</param>
+            /// <param name="vParam">an array of parameter data which will be bounded to previously prepared parameters. The array size can be 0 if the given batch SQL statement doesn't having any prepared statement</param>
+            /// <param name="handler">a callback for tracking final result</param>
+            /// <param name="row">a callback for receiving records of data</param>
+            /// <param name="rh">a callback for tracking row set of header column informations</param>
+            /// <param name="batchHeader">a callback for tracking returning batch start error messages</param>
+            /// <returns>true if request is successfully sent or queued; and false if request is NOT successfully sent or queued</returns>
+            public bool ExecuteBatch(tagTransactionIsolation isolation, string sql, CDBVariantArray vParam, DExecuteResult handler, DRows row, DRowsetHeader rh, DRowsetHeader batchHeader) {
+                return ExecuteBatch(isolation, sql, vParam, handler, row, rh, batchHeader, null, tagRollbackPlan.rpDefault, null, ";", true, true);
+            }
+
+            /// <summary>
+            /// Execute a batch of SQL statements on one single call
+            /// </summary>
+            /// <param name="isolation">a value for manual transaction isolation. Specifically, there is no manual transaction around the batch SQL statements if it is tiUnspecified</param>
+            /// <param name="sql">a SQL statement having a batch of individual SQL statements</param>
+            /// <param name="vParam">an array of parameter data which will be bounded to previously prepared parameters. The array size can be 0 if the given batch SQL statement doesn't having any prepared statement</param>
+            /// <param name="handler">a callback for tracking final result</param>
+            /// <param name="row">a callback for receiving records of data</param>
+            /// <param name="rh">a callback for tracking row set of header column informations</param>
+            /// <param name="batchHeader">a callback for tracking returning batch start error messages</param>
+            /// <param name="vPInfo">a given array of parameter informations which may be empty to some of database management systems</param>
+            /// <returns>true if request is successfully sent or queued; and false if request is NOT successfully sent or queued</returns>
+            public bool ExecuteBatch(tagTransactionIsolation isolation, string sql, CDBVariantArray vParam, DExecuteResult handler, DRows row, DRowsetHeader rh, DRowsetHeader batchHeader, CParameterInfo[] vPInfo) {
+                return ExecuteBatch(isolation, sql, vParam, handler, row, rh, batchHeader, vPInfo, tagRollbackPlan.rpDefault, null, ";", true, true);
+            }
+
+            /// <summary>
+            /// Execute a batch of SQL statements on one single call
+            /// </summary>
+            /// <param name="isolation">a value for manual transaction isolation. Specifically, there is no manual transaction around the batch SQL statements if it is tiUnspecified</param>
+            /// <param name="sql">a SQL statement having a batch of individual SQL statements</param>
+            /// <param name="vParam">an array of parameter data which will be bounded to previously prepared parameters. The array size can be 0 if the given batch SQL statement doesn't having any prepared statement</param>
+            /// <param name="handler">a callback for tracking final result</param>
+            /// <param name="row">a callback for receiving records of data</param>
+            /// <param name="rh">a callback for tracking row set of header column informations</param>
+            /// <param name="batchHeader">a callback for tracking returning batch start error messages</param>
+            /// <param name="vPInfo">a given array of parameter informations which may be empty to some of database management systems</param>
+            /// <param name="plan">a value for computing how included transactions should be rollback</param>
+            /// <returns>true if request is successfully sent or queued; and false if request is NOT successfully sent or queued</returns>
+            public bool ExecuteBatch(tagTransactionIsolation isolation, string sql, CDBVariantArray vParam, DExecuteResult handler, DRows row, DRowsetHeader rh, DRowsetHeader batchHeader, CParameterInfo[] vPInfo, tagRollbackPlan plan) {
+                return ExecuteBatch(isolation, sql, vParam, handler, row, rh, batchHeader, vPInfo, plan, null, ";", true, true);
+            }
+
+            /// <summary>
+            /// Execute a batch of SQL statements on one single call
+            /// </summary>
+            /// <param name="isolation">a value for manual transaction isolation. Specifically, there is no manual transaction around the batch SQL statements if it is tiUnspecified</param>
+            /// <param name="sql">a SQL statement having a batch of individual SQL statements</param>
+            /// <param name="vParam">an array of parameter data which will be bounded to previously prepared parameters. The array size can be 0 if the given batch SQL statement doesn't having any prepared statement</param>
+            /// <param name="handler">a callback for tracking final result</param>
+            /// <param name="row">a callback for receiving records of data</param>
+            /// <param name="rh">a callback for tracking row set of header column informations</param>
+            /// <param name="batchHeader">a callback for tracking returning batch start error messages</param>
+            /// <param name="vPInfo">a given array of parameter informations which may be empty to some of database management systems</param>
+            /// <param name="plan">a value for computing how included transactions should be rollback</param>
+            /// <param name="discarded">a callback for tracking socket closed or request canceled event</param>
+            /// <returns>true if request is successfully sent or queued; and false if request is NOT successfully sent or queued</returns>
+            public bool ExecuteBatch(tagTransactionIsolation isolation, string sql, CDBVariantArray vParam, DExecuteResult handler, DRows row, DRowsetHeader rh, DRowsetHeader batchHeader, CParameterInfo[] vPInfo, tagRollbackPlan plan, DDiscarded discarded) {
+                return ExecuteBatch(isolation, sql, vParam, handler, row, rh, batchHeader, vPInfo, plan, discarded, ";", true, true);
+            }
+
+            /// <summary>
+            /// Execute a batch of SQL statements on one single call
+            /// </summary>
+            /// <param name="isolation">a value for manual transaction isolation. Specifically, there is no manual transaction around the batch SQL statements if it is tiUnspecified</param>
+            /// <param name="sql">a SQL statement having a batch of individual SQL statements</param>
+            /// <param name="vParam">an array of parameter data which will be bounded to previously prepared parameters. The array size can be 0 if the given batch SQL statement doesn't having any prepared statement</param>
+            /// <param name="handler">a callback for tracking final result</param>
+            /// <param name="row">a callback for receiving records of data</param>
+            /// <param name="rh">a callback for tracking row set of header column informations</param>
+            /// <param name="batchHeader">a callback for tracking returning batch start error messages</param>
+            /// <param name="vPInfo">a given array of parameter informations which may be empty to some of database management systems</param>
+            /// <param name="plan">a value for computing how included transactions should be rollback</param>
+            /// <param name="discarded">a callback for tracking socket closed or request canceled event</param>
+            /// <param name="delimiter">a case-sensitive delimiter string used for separating the batch SQL statements into individual SQL statements at server side for processing</param>
+            /// <returns>true if request is successfully sent or queued; and false if request is NOT successfully sent or queued</returns>
+            public bool ExecuteBatch(tagTransactionIsolation isolation, string sql, CDBVariantArray vParam, DExecuteResult handler, DRows row, DRowsetHeader rh, DRowsetHeader batchHeader, CParameterInfo[] vPInfo, tagRollbackPlan plan, DDiscarded discarded, string delimiter) {
+                return ExecuteBatch(isolation, sql, vParam, handler, row, rh, batchHeader, vPInfo, plan, discarded, delimiter, true, true);
+            }
+
+            /// <summary>
+            /// Execute a batch of SQL statements on one single call
+            /// </summary>
+            /// <param name="isolation">a value for manual transaction isolation. Specifically, there is no manual transaction around the batch SQL statements if it is tiUnspecified</param>
+            /// <param name="sql">a SQL statement having a batch of individual SQL statements</param>
+            /// <param name="vParam">an array of parameter data which will be bounded to previously prepared parameters. The array size can be 0 if the given batch SQL statement doesn't having any prepared statement</param>
+            /// <param name="handler">a callback for tracking final result</param>
+            /// <param name="row">a callback for receiving records of data</param>
+            /// <param name="rh">a callback for tracking row set of header column informations</param>
+            /// <param name="batchHeader">a callback for tracking returning batch start error messages</param>
+            /// <param name="vPInfo">a given array of parameter informations which may be empty to some of database management systems</param>
+            /// <param name="plan">a value for computing how included transactions should be rollback</param>
+            /// <param name="discarded">a callback for tracking socket closed or request canceled event</param>
+            /// <param name="delimiter">a case-sensitive delimiter string used for separating the batch SQL statements into individual SQL statements at server side for processing</param>
+            /// <param name="meta">a boolean for better or more detailed column meta details such as unique, not null, primary key, and so on</param>
+            /// <returns>true if request is successfully sent or queued; and false if request is NOT successfully sent or queued</returns>
+            public bool ExecuteBatch(tagTransactionIsolation isolation, string sql, CDBVariantArray vParam, DExecuteResult handler, DRows row, DRowsetHeader rh, DRowsetHeader batchHeader, CParameterInfo[] vPInfo, tagRollbackPlan plan, DDiscarded discarded, string delimiter, bool meta) {
+                return ExecuteBatch(isolation, sql, vParam, handler, row, rh, batchHeader, vPInfo, plan, discarded, delimiter, meta, true);
+            }
+
+            /// <summary>
+            /// Execute a batch of SQL statements on one single call
+            /// </summary>
+            /// <param name="isolation">a value for manual transaction isolation. Specifically, there is no manual transaction around the batch SQL statements if it is tiUnspecified</param>
+            /// <param name="sql">a SQL statement having a batch of individual SQL statements</param>
+            /// <param name="vParam">an array of parameter data which will be bounded to previously prepared parameters. The array size can be 0 if the given batch SQL statement doesn't having any prepared statement</param>
+            /// <param name="handler">a callback for tracking final result</param>
+            /// <param name="row">a callback for receiving records of data</param>
+            /// <param name="rh">a callback for tracking row set of header column informations</param>
+            /// <param name="batchHeader">a callback for tracking returning batch start error messages</param>
+            /// <param name="vPInfo">a given array of parameter informations which may be empty to some of database management systems</param>
+            /// <param name="plan">a value for computing how included transactions should be rollback</param>
+            /// <param name="discarded">a callback for tracking socket closed or request canceled event</param>
+            /// <param name="delimiter">a case-sensitive delimiter string used for separating the batch SQL statements into individual SQL statements at server side for processing</param>
+            /// <param name="meta">a boolean for better or more detailed column meta details such as unique, not null, primary key, and so on</param>
+            /// <param name="lastInsertId">a boolean for last insert record identification number</param>
+            /// <returns>true if request is successfully sent or queued; and false if request is NOT successfully sent or queued</returns>
+            public virtual bool ExecuteBatch(tagTransactionIsolation isolation, string sql, CDBVariantArray vParam, DExecuteResult handler, DRows row, DRowsetHeader rh, DRowsetHeader batchHeader, CParameterInfo[] vPInfo, tagRollbackPlan plan, DDiscarded discarded, string delimiter, bool meta, bool lastInsertId) {
+                if (vPInfo == null)
+                    vPInfo = new CParameterInfo[0];
+                bool rowset = (rh != null || row != null) ? true : false;
+                if (!rowset)
+                    meta = false;
+                using (CScopeUQueue sub = new CScopeUQueue()) {
+                    bool queueOk = false;
+                    CUQueue sb = sub.UQueue;
+                    sb.Save(sql).Save(delimiter).Save((int)isolation).Save((int)plan).Save(rowset).Save(meta).Save(lastInsertId);
+                    //make sure all parameter data sending and ExecuteParameters sending as one combination sending
+                    //to avoid possible request sending overlapping within multiple threading environment
+                    lock (m_csOneSending) {
+                        if (vParam != null && vParam.Count > 0) {
+                            queueOk = AttachedClientSocket.ClientQueue.StartJob();
+                            if (!SendParametersData(vParam)) {
+                                lock (m_csDB) {
+                                    Clean();
+                                }
+                                return false;
+                            }
+                        }
+                        ulong callIndex = GetCallIndex();
+                        //don't make m_csDB locked across calling SendRequest, which may lead to client dead-lock
+                        //in case a client asynchronously sends lots of requests without use of client side queue.
+                        lock (m_csDB) {
+                            if (rowset) {
+                                m_mapRowset[callIndex] = new KeyValuePair<DRowsetHeader, DRows>(rh, row);
+                            }
+                            m_mapParameterCall[callIndex] = vParam;
+                            m_mapHandler[callIndex] = batchHeader;
+                            sb.Save(m_strConnection).Save(m_flags);
+                        }
+                        sb.Save(callIndex);
+                        sb.Save(vPInfo.Length);
+                        foreach (CParameterInfo info in vPInfo) {
+                            info.SaveTo(sb);
+                        }
+                        if (!SendRequest(DB_CONSTS.idExecuteBatch, sb.IntenalBuffer, sb.GetSize(), (ar) => {
+                            long affected;
+                            ulong fail_ok;
+                            int res;
+                            string errMsg;
+                            object vtId;
+                            ar.Load(out affected).Load(out res).Load(out errMsg).Load(out vtId).Load(out fail_ok);
+                            lock (m_csDB) {
+                                m_lastReqId = DB_CONSTS.idExecuteBatch;
+                                m_affected = affected;
+                                m_dbErrCode = res;
+                                m_dbErrMsg = errMsg;
+                                m_mapRowset.Remove(callIndex);
+                                m_mapParameterCall.Remove(callIndex);
+                                m_mapHandler.Remove(callIndex);
+                                m_indexProc = 0;
+                            }
+                            if (handler != null)
+                                handler(this, res, errMsg, affected, fail_ok, vtId);
+                        }, discarded, null)) {
+                            lock (m_csDB) {
+                                m_mapHandler.Remove(callIndex);
+                                m_mapParameterCall.Remove(callIndex);
+                                if (rowset) {
+                                    m_mapRowset.Remove(callIndex);
+                                }
+                            }
+                            return false;
+                        }
+                        if (queueOk)
+                            AttachedClientSocket.ClientQueue.EndJob();
+                        return true;
+                    }
+                }
+
+            }
+
 
             /// <summary>
             /// Asynchronously process a complex SQL statement which may be combined with multiple basic SQL statements, and don't expect any data returned
@@ -1027,7 +1295,7 @@ namespace SocketProAdapter {
                         if (m_queueOk) {
                             //associate end transaction with underlying client persistent message queue
                             AttachedClientSocket.ClientQueue.EndJob();
-                            m_queueOk = true;
+                            m_queueOk = false;
                         }
                         return true;
                     }
@@ -1083,7 +1351,7 @@ namespace SocketProAdapter {
                     }
                     //associate begin transaction with underlying client persistent message queue
                     m_queueOk = AttachedClientSocket.ClientQueue.StartJob();
-                    bool ok = SendRequest(DB_CONSTS.idBeginTrans, (int)isolation, connection, flags, (ar) => {
+                    return SendRequest(DB_CONSTS.idBeginTrans, (int)isolation, connection, flags, (ar) => {
                         int res, ms;
                         string errMsg;
                         ar.Load(out res).Load(out errMsg).Load(out ms);
@@ -1101,10 +1369,6 @@ namespace SocketProAdapter {
                             handler(this, res, errMsg);
                         }
                     }, discarded, null);
-                    if (!ok && m_queueOk) {
-                        AttachedClientSocket.ClientQueue.AbortJob();
-                    }
-                    return ok;
                 }
             }
 
@@ -1141,14 +1405,24 @@ namespace SocketProAdapter {
                         m_strConnection = "";
                         m_dbErrCode = res;
                         m_dbErrMsg = errMsg;
-                        m_parameters = 0;
-                        m_indexProc = 0;
-                        m_output = 0;
                     }
                     if (handler != null) {
                         handler(this, res, errMsg);
                     }
                 }, discarded, null);
+            }
+
+            protected override void OnAllProcessed() {
+                lock (m_csDB) {
+                    m_mapRowset.Clear();
+                    m_mapParameterCall.Clear();
+                    m_mapHandler.Clear();
+                    m_vData.Clear();
+                    m_Blob.SetSize(0);
+                    if (m_Blob.MaxBufferSize > DB_CONSTS.DEFAULT_BIG_FIELD_CHUNK_SIZE) {
+                        m_Blob.Realloc(DB_CONSTS.DEFAULT_BIG_FIELD_CHUNK_SIZE);
+                    }
+                }
             }
 
             protected override void OnMergeTo(CAsyncServiceHandler to) {
@@ -1163,13 +1437,51 @@ namespace SocketProAdapter {
                             dbTo.m_mapParameterCall.Add(callIndex, m_mapParameterCall[callIndex]);
                         }
                         m_mapParameterCall.Clear();
+                        foreach (ulong callIndex in m_mapHandler.Keys) {
+                            dbTo.m_mapHandler.Add(callIndex, m_mapHandler[callIndex]);
+                        }
+                        m_mapHandler.Clear();
                     }
                 }
             }
 
             protected override void OnResultReturned(ushort reqId, CUQueue mc) {
                 switch (reqId) {
+                    case DB_CONSTS.idParameterPosition:
+                        mc.Load(out m_nParamPos);
+                        lock (m_csDB) {
+                            m_bCallReturn = false;
+                            m_indexProc = 0;
+                        }
+                        break;
+                    case DB_CONSTS.idSqlBatchHeader: {
+                            ulong callIndex;
+                            int res, ms;
+                            uint parameters;
+                            DRowsetHeader cb = null;
+                            string errMsg;
+                            mc.Load(out res).Load(out errMsg).Load(out ms).Load(out parameters).Load(out callIndex);
+                            lock (m_csDB) {
+                                m_indexProc = 0;
+                                m_lastReqId = reqId;
+                                m_parameters = (parameters & (uint)0xffff);
+                                m_output = 0;
+                                if (res == 0) {
+                                    m_strConnection = errMsg;
+                                    errMsg = "";
+                                }
+                                m_dbErrCode = res;
+                                m_dbErrMsg = errMsg;
+                                m_ms = (tagManagementSystem)ms;
+                                if (m_mapHandler.ContainsKey(callIndex))
+                                    cb = m_mapHandler[callIndex];
+                            }
+                            if (cb != null)
+                                cb(this);
+                        }
+                        break;
                     case DB_CONSTS.idRowsetHeader: {
+                            uint output = 0;
                             m_Blob.SetSize(0);
                             if (m_Blob.MaxBufferSize > ONE_MEGA_BYTES) {
                                 m_Blob.Realloc(ONE_MEGA_BYTES);
@@ -1181,11 +1493,9 @@ namespace SocketProAdapter {
                                 m_vColInfo.LoadFrom(mc);
                                 mc.Load(out m_indexRowset);
                                 if (mc.GetSize() > 0) {
-                                    mc.Load(out m_output);
-                                } else {
-                                    m_output = 0;
+                                    mc.Load(out output);
                                 }
-                                if (m_output == 0 && m_vColInfo.Count > 0) {
+                                if (output == 0 && m_vColInfo.Count > 0) {
                                     if (m_mapRowset.ContainsKey(m_indexRowset)) {
                                         header = m_mapRowset[m_indexRowset].Key;
                                     }
@@ -1202,7 +1512,7 @@ namespace SocketProAdapter {
                             lock (m_csDB) {
                                 if (m_mapParameterCall.ContainsKey(m_indexRowset)) {
                                     CDBVariantArray vParam = m_mapParameterCall[m_indexRowset];
-                                    uint pos = m_parameters * m_indexProc;
+                                    uint pos = m_parameters * m_indexProc + (m_nParamPos >> 16);
                                     vParam[(int)pos] = vt;
                                 }
                                 m_bCallReturn = true;
@@ -1235,17 +1545,27 @@ namespace SocketProAdapter {
                             }
                             if (reqId == DB_CONSTS.idOutputParameter) {
                                 lock (m_csDB) {
-                                    m_output = (uint)(m_vData.Count + (m_bCallReturn ? 1 : 0));
+                                    if (m_lastReqId == DB_CONSTS.idSqlBatchHeader) {
+                                        if (m_indexProc == 0)
+                                            m_output += (uint)(m_vData.Count + (m_bCallReturn ? 1 : 0));
+                                    } else {
+                                        if (m_output == 0)
+                                            m_output = (uint)(m_vData.Count + (m_bCallReturn ? 1 : 0));
+                                    }
                                     if (m_mapParameterCall.ContainsKey(m_indexRowset)) {
                                         CDBVariantArray vParam = m_mapParameterCall[m_indexRowset];
-                                        uint pos = m_parameters * m_indexProc + m_parameters - (uint)m_vData.Count;
+                                        uint pos;
+                                        if (m_lastReqId == DB_CONSTS.idSqlBatchHeader)
+                                            pos = m_parameters * m_indexProc + (m_nParamPos & 0xffff) + (m_nParamPos >> 16) - (uint)m_vData.Count;
+                                        else
+                                            pos = m_parameters * m_indexProc + m_parameters - (uint)m_vData.Count;
                                         foreach (object obj in m_vData) {
                                             vParam[(int)pos] = obj;
                                             ++pos;
                                         }
                                     }
-                                    ++m_indexProc;
                                 }
+                                ++m_indexProc;
                             } else {
                                 DRows row = null;
                                 lock (m_csDB) {
