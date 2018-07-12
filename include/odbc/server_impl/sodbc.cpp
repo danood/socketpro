@@ -3,6 +3,10 @@
 
 std::shared_ptr<SPA::ServerSide::COdbcService> g_pOdbc;
 
+bool WINAPI DoODBCAuthentication(USocket_Server_Handle hSocket, const wchar_t *userId, const wchar_t *password, unsigned int nSvsId, const wchar_t *odbcDriver, const wchar_t *dsn) {
+    return SPA::ServerSide::COdbcImpl::DoSQLAuthentication(hSocket, userId, password, nSvsId, odbcDriver, dsn);
+}
+
 void WINAPI SetOdbcDBGlobalConnectionString(const wchar_t *dbConnection) {
     SPA::ServerSide::COdbcImpl::SetGlobalConnectionString(dbConnection);
 }
@@ -67,7 +71,6 @@ unsigned short WINAPI GetOneSlowRequestID(unsigned int serviceId, unsigned short
             return SPA::Odbc::idSQLForeignKeys;
         case 10:
             return SPA::Odbc::idSQLPrimaryKeys;
-            break;
         case 11:
             return SPA::Odbc::idSQLProcedureColumns;
         case 12:
@@ -80,7 +83,7 @@ unsigned short WINAPI GetOneSlowRequestID(unsigned int serviceId, unsigned short
             return SPA::Odbc::idSQLTablePrivileges;
         case 16:
             return SPA::Odbc::idSQLTables;
-		case 17:
+        case 17:
             return SPA::UDB::idExecuteBatch;
         default:
             break;
