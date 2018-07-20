@@ -2,11 +2,9 @@
 using System;
 using SocketProAdapter;
 using SocketProAdapter.ServerSide;
-using SocketProAdapter.UDB;
-using System.Data.SqlClient;
 using System.Runtime.InteropServices;
 
-class CSqlPlugin : CSocketProServer {
+public class CSqlPlugin : CSocketProServer {
     public CSqlPlugin(int param = 0)
         : base(param) {
     }
@@ -34,7 +32,7 @@ class CSqlPlugin : CSocketProServer {
                 DllManager.AddALibrary(s);
         }
 #endif
-        PushManager.AddAChatGroup(DB_CONSTS.STREAMING_SQL_CHAT_GROUP_ID, "Subscribe/publish for MS SQL SERVER Table events, DELETE, INSERT and UPDATE");
+        PushManager.AddAChatGroup(SocketProAdapter.UDB.DB_CONSTS.STREAMING_SQL_CHAT_GROUP_ID, "Subscribe/publish for MS SQL SERVER Table events, DELETE, INSERT and UPDATE");
         return base.Run(port, maxBacklog, v6Supported);
     }
 
@@ -42,7 +40,7 @@ class CSqlPlugin : CSocketProServer {
         if (nSvsID == BaseServiceID.sidHTTP)
             return true; //do authentication inside the method CMyHttpPeer.DoAuthentication
 #if PLUGIN_DEV
-        return DoODBCAuthentication(hSocket, userId, password, nSvsID, "{SQL Server}", "");
+        return DoODBCAuthentication(hSocket, userId, password, nSvsID, "{SQL Server Native Client 11.0}", "");
 #else
         string driver = SQLConfig.ODBCDriver;
         return DoODBCAuthentication(hSocket, userId, password, nSvsID, driver, "");
