@@ -19,13 +19,13 @@ namespace SPA {
             typedef DDownload DUpload;
             typedef std::function<void(CStreamingFile *file, UINT64 transferred) > DTransferring;
 
-            CStreamingFile(CClientSocket * cs = nullptr) : CAsyncServiceHandler(SFile::sidFile, cs) {
+            CStreamingFile(CClientSocket * cs) : CAsyncServiceHandler(SFile::sidFile, cs) {
             }
 
         protected:
             //You may use the protected constructor when extending this class
 
-            CStreamingFile(unsigned int sid, CClientSocket * cs = nullptr) : CAsyncServiceHandler(sid, cs) {
+            CStreamingFile(unsigned int sid, CClientSocket * cs) : CAsyncServiceHandler(sid, cs) {
             }
 
         private:
@@ -389,8 +389,7 @@ namespace SPA {
                 while (index < m_vContext.size()) {
                     CContext &context = m_vContext[index];
                     if (context.Sent) {
-                        ++index;
-                        continue;
+                        return true;
                     }
                     if (context.Uploading && context.Tried && !IsOpened(context)) {
                         if (index == 0) {
@@ -528,4 +527,4 @@ namespace SPA {
     }; //ClientSide
 }; //SPA
 
-#endif 
+#endif

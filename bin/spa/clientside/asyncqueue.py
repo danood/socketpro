@@ -94,7 +94,7 @@ class CAsyncQueue(CAsyncServiceHandler):
         if not e:
             ok = self.SendRequest(CAsyncQueue.idEnqueue, buffer, None, discarded)
         else:
-            ok = self.SendRequest(CAsyncQueue.idEnqueue, buffer, lambda ar: e(ar.LoadULong()), discarded)
+            ok = self.SendRequest(CAsyncQueue.idEnqueue, buffer, lambda ar: e(ar.AsyncServiceHandler, ar.LoadULong()), discarded)
         CScopeUQueue.Unlock(buffer)
         return ok
 
@@ -116,7 +116,7 @@ class CAsyncQueue(CAsyncServiceHandler):
         if not qt:
             ok = self.SendRequest(CAsyncQueue.idStartTrans, buffer, None, discarded)
         else:
-            ok = self.SendRequest(CAsyncQueue.idStartTrans, buffer, lambda ar: qt(ar.LoadInt()), discarded)
+            ok = self.SendRequest(CAsyncQueue.idStartTrans, buffer, lambda ar: qt(ar.AsyncServiceHandler, ar.LoadInt()), discarded)
         CScopeUQueue.Unlock(buffer)
         return ok
 
@@ -133,7 +133,7 @@ class CAsyncQueue(CAsyncServiceHandler):
         if not qt:
             ok = self.SendRequest(CAsyncQueue.idEndTrans, buffer, None, discarded)
         else:
-            ok = self.SendRequest(CAsyncQueue.idEndTrans, buffer, lambda ar: qt(ar.LoadInt()), discarded)
+            ok = self.SendRequest(CAsyncQueue.idEndTrans, buffer, lambda ar: qt(ar.AsyncServiceHandler, ar.LoadInt()), discarded)
         cq = self.AttachedClientSocket.ClientQueue
         if cq.Available:
             if rollback:
@@ -158,7 +158,7 @@ class CAsyncQueue(CAsyncServiceHandler):
             while size > 0:
                 v.append(ar.LoadAString())
                 size -= 1
-            gk(v)
+            gk(ar.AsyncServiceHandler, v)
         return self.SendRequest(CAsyncQueue.idGetKeys, None, cb, discarded)
 
     def CloseQueue(self, key, c=None, discarded=None, permanent=False):
@@ -177,7 +177,7 @@ class CAsyncQueue(CAsyncServiceHandler):
         if not c:
             ok = self.SendRequest(CAsyncQueue.idClose, buffer, None, discarded)
         else:
-            ok = self.SendRequest(CAsyncQueue.idClose, buffer, lambda ar: c(ar.LoadInt()), discarded)
+            ok = self.SendRequest(CAsyncQueue.idClose, buffer, lambda ar: c(ar.AsyncServiceHandler, ar.LoadInt()), discarded)
         CScopeUQueue.Unlock(buffer)
         return ok
 
@@ -192,12 +192,12 @@ class CAsyncQueue(CAsyncServiceHandler):
         """
         if not key:
             key = ''
-        buffer = CScopeUQueue.Lock().SaveAString(key)
+        buffer = CScopeUQueue.Lock().SaveAString(key).SaveInt(option)
         ok = None
         if not f:
             ok = self.SendRequest(CAsyncQueue.idFlush, buffer, None, discarded)
         else:
-            ok = self.SendRequest(CAsyncQueue.idFlush, buffer, lambda ar: f(ar.LoadULong(), ar.LoadULong()), discarded)
+            ok = self.SendRequest(CAsyncQueue.idFlush, buffer, lambda ar: f(ar.AsyncServiceHandler, ar.LoadULong(), ar.LoadULong()), discarded)
         CScopeUQueue.Unlock(buffer)
         return ok
 
@@ -220,7 +220,7 @@ class CAsyncQueue(CAsyncServiceHandler):
         if not d:
             ok = self.SendRequest(CAsyncQueue.idDequeue, buffer, None, discarded)
         else:
-            ok = self.SendRequest(CAsyncQueue.idDequeue, buffer, lambda ar: d(ar.LoadULong(), ar.LoadULong(), ar.LoadUInt(), ar.LoadUInt()), discarded)
+            ok = self.SendRequest(CAsyncQueue.idDequeue, buffer, lambda ar: d(ar.AsyncServiceHandler, ar.LoadULong(), ar.LoadULong(), ar.LoadUInt(), ar.LoadUInt()), discarded)
         CScopeUQueue.Unlock(buffer)
         return ok
 
@@ -232,7 +232,7 @@ class CAsyncQueue(CAsyncServiceHandler):
             if d:
                 self.Dequeue(key, d, 0)
             if self.MessageQueued:
-                self.MessageQueued()
+                self.MessageQueued(self)
 
     def OnResultReturned(self, reqId, mc):
         if reqId == CAsyncQueue.idBatchSizeNotified:

@@ -18,13 +18,13 @@ namespace SPA {
             }
 
             //callback definitions
-            typedef std::function<void(int errCode) > DQueueTrans;
-            typedef std::function<void(std::vector<std::string>& v) > DGetKeys;
-            typedef std::function<void(UINT64 messageCount, UINT64 fileSize) > DFlush;
-            typedef std::function<void(UINT64 indexMessage) > DEnqueue;
-            typedef std::function<void(int errCode) > DClose;
-            typedef std::function<void(UINT64 messageCount, UINT64 fileSize, unsigned int messagesDequeuedInBatch, unsigned int bytesDequeuedInBatch) > DDequeue;
-            typedef std::function<void() > DMessageQueued;
+            typedef std::function<void(CAsyncQueue *aq, int errCode) > DQueueTrans;
+            typedef std::function<void(CAsyncQueue *aq, std::vector<std::string>& v) > DGetKeys;
+            typedef std::function<void(CAsyncQueue *aq, UINT64 messageCount, UINT64 fileSize) > DFlush;
+            typedef std::function<void(CAsyncQueue *aq, UINT64 indexMessage) > DEnqueue;
+            typedef std::function<void(CAsyncQueue *aq, int errCode) > DClose;
+            typedef std::function<void(CAsyncQueue *aq, UINT64 messageCount, UINT64 fileSize, unsigned int messagesDequeuedInBatch, unsigned int bytesDequeuedInBatch) > DDequeue;
+            typedef std::function<void(CAsyncQueue *aq) > DMessageQueued;
 
         public:
 
@@ -75,7 +75,7 @@ namespace SPA {
                             ar >> s;
                             v.push_back(s);
                         }
-                        gk(v);
+                        gk((CAsyncQueue*) ar.AsyncServiceHandler, v);
                     } else {
                         ar.UQueue.SetSize(0);
                     }
@@ -100,7 +100,7 @@ namespace SPA {
                     if (qt) {
                         int errCode;
                         ar >> errCode;
-                        qt(errCode);
+                        qt((CAsyncQueue*) ar.AsyncServiceHandler, errCode);
                     } else {
                         ar.UQueue.SetSize(0);
                     }
@@ -120,7 +120,7 @@ namespace SPA {
                     if (qt) {
                         int errCode;
                         ar >> errCode;
-                        qt(errCode);
+                        qt((CAsyncQueue*) ar.AsyncServiceHandler, errCode);
                     } else {
                         ar.UQueue.SetSize(0);
                     }
@@ -151,7 +151,7 @@ namespace SPA {
                     if (c) {
                         int errCode;
                         ar >> errCode;
-                        c(errCode);
+                        c((CAsyncQueue*) ar.AsyncServiceHandler, errCode);
                     } else {
                         ar.UQueue.SetSize(0);
                     }
@@ -172,7 +172,7 @@ namespace SPA {
                     if (f) {
                         UINT64 messageCount, fileSize;
                         ar >> messageCount >> fileSize;
-                        f(messageCount, fileSize);
+                        f((CAsyncQueue*) ar.AsyncServiceHandler, messageCount, fileSize);
                     } else {
                         ar.UQueue.SetSize(0);
                     }
@@ -199,7 +199,7 @@ namespace SPA {
                             ar >> messageCount >> fileSize >> ret;
                             unsigned int messages = (unsigned int) ret;
                             unsigned int bytes = (unsigned int) (ret >> 32);
-                            d(messageCount, fileSize, messages, bytes);
+                            d((CAsyncQueue*) ar.AsyncServiceHandler, messageCount, fileSize, messages, bytes);
                         };
                         m_dDequeue = d;
                     } else {
@@ -217,7 +217,7 @@ namespace SPA {
                     rh = [e](CAsyncResult & ar) {
                         UINT64 index;
                         ar >> index;
-                        e(index);
+                        e((CAsyncQueue*) ar.AsyncServiceHandler, index);
                     };
                 }
                 return rh;
@@ -317,15 +317,22 @@ namespace SPA {
             }
 
             bool EnqueueBatch(const char *key, CUQueue &q, DEnqueue e = nullptr, DDiscarded discarded = nullptr) {
-                if (q.GetSize() < 2 * sizeof (unsigned int)) {
-                    //bad operation!
+                if (EnqueueBatch(key, q.GetBuffer(), q.GetSize(), e, discarded)) {
+                    q.SetSize(0);
+                    return true;
+                }
+                return false;
+            }
+
+            virtual bool EnqueueBatch(const char *key, const unsigned char *buffer, unsigned int size, DEnqueue e = nullptr, DDiscarded discarded = nullptr) {
+                if (!buffer || size < 2 * sizeof (unsigned int) + sizeof (unsigned short)) {
+                    //bad operation because no message batched yet!
                     assert(false);
                     return false;
                 }
                 CScopeUQueue sb;
                 sb << key;
-                sb->Push(q.GetBuffer(), q.GetSize());
-                q.SetSize(0);
+                sb->Push(buffer, size);
                 return SendRequest(Queue::idEnqueueBatch, sb->GetBuffer(), sb->GetSize(), GetRH(e), discarded);
             }
 
@@ -426,7 +433,7 @@ namespace SPA {
                         }
                     }
                         if (MessageQueued) {
-                            MessageQueued();
+                            MessageQueued(this);
                         }
                         break;
                     default:
@@ -454,9 +461,11 @@ namespace SPA {
              */
             DMessageQueued MessageQueued;
 
+        protected:
+            SPA::CUCriticalSection m_csQ;
+
         private:
             unsigned int m_nBatchSize;
-            SPA::CUCriticalSection m_csQ;
             std::string m_keyDequeue; //protected by m_csQ
             DDequeue m_dDequeue; //protected by m_csQ
         };

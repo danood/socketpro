@@ -1,9 +1,13 @@
-
 #include "aclientw.h"
 
-namespace SPA
-{
-    namespace ClientSide{
+#ifdef NODE_JS_ADAPTER_PROJECT
+
+#include "../src/njadapter/njadapter/njobjects.h"
+
+#endif
+
+namespace SPA {
+    namespace ClientSide {
 
         CUCriticalSection g_csSpPool;
 
@@ -24,6 +28,13 @@ namespace SPA
                 Attach(cs);
             m_vCallback.SetBlockSize(128 * 1024);
             m_vCallback.ReallocBuffer(128 * 1024);
+
+#ifdef NODE_JS_ADAPTER_PROJECT
+            ::memset(&m_typeReq, 0, sizeof (m_typeReq));
+            m_typeReq.data = this;
+            int fail = uv_async_init(uv_default_loop(), &m_typeReq, req_cb);
+            assert(!fail);
+#endif
         }
 
         CAsyncServiceHandler::~CAsyncServiceHandler() {
@@ -31,6 +42,9 @@ namespace SPA
             CAutoLock al(m_cs);
             if (m_pClientSocket)
                 m_pClientSocket->Detach(this);
+#ifdef NODE_JS_ADAPTER_PROJECT         
+            uv_close((uv_handle_t*) & m_typeReq, nullptr);
+#endif
         }
 
         UINT64 CAsyncServiceHandler::GetCallIndex() {
@@ -397,6 +411,9 @@ namespace SPA
             m_mutex.lock();
             m_vClientSocket.push_back(this);
             m_mutex.unlock();
+#ifdef NODE_JS_ADAPTER_PROJECT
+            m_asyncType = nullptr;
+#endif
         }
 
         void CClientSocket::Set(USocket_Client_Handle h) {
@@ -503,8 +520,7 @@ namespace SPA
         }
 
         void SetLastCallInfo(const char *str, int data, const char *func) {
-            char buff[4097] =
-            {0};
+            char buff[4097] ={0};
 #ifdef WIN32_64
             _snprintf_s(buff, sizeof (buff), sizeof (buff), "lf: %s, what: %s, data: %d", func, str, data);
 #else
@@ -633,8 +649,7 @@ namespace SPA
         }
 
         std::string CClientSocket::GetPeerName(unsigned int *port) const {
-            char ipAddr[256] =
-            {0};
+            char ipAddr[256] ={0};
             ClientCoreLoader.GetPeerName(m_hSocket, port, ipAddr, sizeof (ipAddr));
             return ipAddr;
         }
@@ -667,7 +682,7 @@ namespace SPA
             ClientCoreLoader.SetZip(m_hSocket, zip);
         }
 
-        bool CClientSocket::operator == (const CClientSocket & cs) const {
+        bool CClientSocket::operator==(const CClientSocket & cs) const {
             return (m_hSocket == cs.m_hSocket);
         }
 
@@ -736,11 +751,6 @@ namespace SPA
             ::memset(&tm, 0, sizeof (tm));
             tm.tm_mday = 1;
             tm.tm_year = 113;
-#ifdef WIN32_64
-            tm.tm_isdst = 1;
-#else
-            tm.tm_isdst = -1;
-#endif
             return std::mktime(&tm) + ClientCoreLoader.GetLastQueueMessageTime(m_hSocket);
         }
 
@@ -939,8 +949,7 @@ namespace SPA
         }
 
         std::string CClientSocket::GetErrorMsg() const {
-            char strErrorMsg[1025] =
-            {0};
+            char strErrorMsg[1025] ={0};
             ClientCoreLoader.GetErrorMessage(m_hSocket, strErrorMsg, sizeof (strErrorMsg));
             return strErrorMsg;
         }
@@ -1062,12 +1071,29 @@ namespace SPA
                     const unsigned char *result = ClientCoreLoader.GetResultBuffer(p->m_hSocket);
                     q.Push(result, len);
                 }
-                CAsyncServiceHandler *ash = p->Seek(p->m_nCurrSvsId);
+                PAsyncServiceHandler ash = p->Seek(p->m_nCurrSvsId);
                 if (ash)
                     ash->OnRR(requestId, q);
                 if (p->RequestProcessed)
                     p->RequestProcessed(p, requestId, q);
                 p->OnRequestProcessed(requestId, q);
+#ifdef NODE_JS_ADAPTER_PROJECT
+                NJA::NJSocketPool *pool = (NJA::NJSocketPool *)p->m_asyncType->data;
+                if (!pool)
+                    return;
+                NJA::SocketEvent se;
+                CAutoLock al(pool->m_cs);
+                if (pool->m_rr.IsEmpty())
+                    return;
+                CUQueue *q2 = CScopeUQueue::Lock();
+                *q2 << ash << requestId;
+                q2->Push(q.GetBuffer(), q.GetSize());
+                se.QData = q2;
+                se.Se = NJA::seResultReturned;
+                pool->m_deqSocketEvent.push_back(se);
+                int fail = uv_async_send(p->m_asyncType);
+                assert(!fail);
+#endif
             }
         }
 
@@ -1075,40 +1101,121 @@ namespace SPA
             CClientSocket *p = Seek(handler);
             if (!p)
                 return;
+#ifdef NODE_JS_ADAPTER_PROJECT
+            VARTYPE vt = (VT_ARRAY | VT_UI4);
+            unsigned short reqId = idEnter;
+            NJA::NJSocketPool *pool = (NJA::NJSocketPool *)p->m_asyncType->data;
+            if (!pool)
+                return;
+            CAutoLock al(pool->m_cs);
+            if (pool->m_push.IsEmpty())
+                return;
+            CUQueue *q = CScopeUQueue::Lock();
+            *q << p->GetCurrentHandler() << reqId << sender << vt << count;
+            q->Push((const unsigned char*) pGroup, count * sizeof (unsigned int));
+            NJA::SocketEvent se;
+            se.QData = q;
+            se.Se = NJA::seChatEnter;
+            pool->m_deqSocketEvent.push_back(se);
+            int fail = uv_async_send(p->m_asyncType);
+            assert(!fail);
+#else
             CPushImpl &push = p->GetPush();
             if (push.OnSubscribe)
                 push.OnSubscribe(p, sender, pGroup, count);
             p->OnSubscribe(sender, pGroup, count);
+#endif
         }
 
         void WINAPI CClientSocket::OnUnsubscribe(USocket_Client_Handle handler, CMessageSender sender, const unsigned int *pGroup, unsigned int count) {
             CClientSocket *p = Seek(handler);
             if (!p)
                 return;
+#ifdef NODE_JS_ADAPTER_PROJECT
+            VARTYPE vt = (VT_ARRAY | VT_UI4);
+            unsigned short reqId = idExit;
+            NJA::NJSocketPool *pool = (NJA::NJSocketPool *)p->m_asyncType->data;
+            if (!pool)
+                return;
+            CAutoLock al(pool->m_cs);
+            if (pool->m_push.IsEmpty())
+                return;
+            CUQueue *q = CScopeUQueue::Lock();
+            *q << p->GetCurrentHandler() << reqId << sender << vt << count;
+            q->Push((const unsigned char*) pGroup, count * sizeof (unsigned int));
+            NJA::SocketEvent se;
+            se.QData = q;
+            se.Se = NJA::seChatExit;
+            pool->m_deqSocketEvent.push_back(se);
+            int fail = uv_async_send(p->m_asyncType);
+            assert(!fail);
+#else
             CPushImpl &push = p->GetPush();
             if (push.OnUnsubscribe)
                 push.OnUnsubscribe(p, sender, pGroup, count);
             p->OnUnsubscribe(sender, pGroup, count);
+#endif
         }
 
         void WINAPI WINAPI CClientSocket::OnBroadcast(USocket_Client_Handle handler, CMessageSender sender, const unsigned int *pGroup, unsigned int count, const unsigned char *pMessage, unsigned int size) {
             CClientSocket *p = Seek(handler);
             if (!p)
                 return;
-            SPA::UVariant vtMessage;
+#ifdef NODE_JS_ADAPTER_PROJECT
+            VARTYPE vt = (VT_ARRAY | VT_UI4);
+            unsigned short reqId = idSpeak;
+            NJA::NJSocketPool *pool = (NJA::NJSocketPool *)p->m_asyncType->data;
+            if (!pool)
+                return;
+            CAutoLock al(pool->m_cs);
+            if (pool->m_push.IsEmpty())
+                return;
+            CUQueue *q = CScopeUQueue::Lock();
+            *q << p->GetCurrentHandler() << reqId << sender << vt << count;
+            q->Push((const unsigned char*) pGroup, count * sizeof (unsigned int));
+            q->Push(pMessage, size);
+            NJA::SocketEvent se;
+            se.QData = q;
+            se.Se = NJA::sePublish;
+            pool->m_deqSocketEvent.push_back(se);
+            int fail = uv_async_send(p->m_asyncType);
+            assert(!fail);
+#else
             CScopeUQueue sb;
             sb->Push(pMessage, size);
+            SPA::UVariant vtMessage;
             sb >> vtMessage;
             CPushImpl &push = p->GetPush();
             if (push.OnPublish)
                 push.OnPublish(p, sender, pGroup, count, vtMessage);
             p->OnPublish(sender, pGroup, count, vtMessage);
+#endif
         }
 
         void WINAPI CClientSocket::OnBroadcastEx(USocket_Client_Handle handler, CMessageSender sender, const unsigned int *pGroup, unsigned int count, const unsigned char *pMessage, unsigned int size) {
             CClientSocket *p = Seek(handler);
             if (!p)
                 return;
+#ifdef NODE_JS_ADAPTER_PROJECT
+            VARTYPE vt = (VT_ARRAY | VT_UI4);
+            unsigned short reqId = idSpeakEx;
+            NJA::NJSocketPool *pool = (NJA::NJSocketPool *)p->m_asyncType->data;
+            if (!pool)
+                return;
+            CAutoLock al(pool->m_cs);
+            if (pool->m_push.IsEmpty())
+                return;
+            CUQueue *q = CScopeUQueue::Lock();
+            *q << p->GetCurrentHandler() << reqId << sender << vt << count;
+            q->Push((const unsigned char*) pGroup, count * sizeof (unsigned int));
+            q->Push(pMessage, size);
+            NJA::SocketEvent se;
+            se.QData = q;
+            se.Se = NJA::sePublishEx;
+            pool->m_deqSocketEvent.push_back(se);
+            int fail = uv_async_send(p->m_asyncType);
+            assert(!fail);
+#else
             CPushImpl &push = p->GetPush();
             if (push.OnPublishEx) {
 #if defined(WIN32_64) && _MSC_VER < 1800
@@ -1119,30 +1226,69 @@ namespace SPA
 #endif
             }
             p->OnPublishEx(sender, pGroup, count, pMessage, size);
+#endif
         }
 
         void WINAPI CClientSocket::OnPostUserMessage(USocket_Client_Handle handler, CMessageSender sender, const unsigned char *pMessage, unsigned int size) {
             CClientSocket *p = Seek(handler);
             if (!p)
                 return;
-            SPA::UVariant vtMessage;
+#ifdef NODE_JS_ADAPTER_PROJECT
+            unsigned short reqId = idSendUserMessage;
+            NJA::NJSocketPool *pool = (NJA::NJSocketPool *)p->m_asyncType->data;
+            if (!pool)
+                return;
+            CAutoLock al(pool->m_cs);
+            if (pool->m_push.IsEmpty())
+                return;
+            CUQueue *q = CScopeUQueue::Lock();
+            *q << p->GetCurrentHandler() << reqId << sender;
+            q->Push(pMessage, size);
+            NJA::SocketEvent se;
+            se.QData = q;
+            se.Se = NJA::sePostUserMessage;
+            pool->m_deqSocketEvent.push_back(se);
+            int fail = uv_async_send(p->m_asyncType);
+            assert(!fail);
+#else
             CScopeUQueue sb;
             sb->Push(pMessage, size);
+            SPA::UVariant vtMessage;
             sb >> vtMessage;
             CPushImpl &push = p->GetPush();
             if (push.OnSendUserMessage)
                 push.OnSendUserMessage(p, sender, vtMessage);
             p->OnSendUserMessage(sender, vtMessage);
+#endif
         }
 
         void WINAPI CClientSocket::OnPostUserMessageEx(USocket_Client_Handle handler, CMessageSender sender, const unsigned char *pMessage, unsigned int size) {
             CClientSocket *p = Seek(handler);
             if (!p)
                 return;
+#ifdef NODE_JS_ADAPTER_PROJECT
+            unsigned short reqId = idSendUserMessageEx;
+            NJA::NJSocketPool *pool = (NJA::NJSocketPool *)p->m_asyncType->data;
+            if (!pool)
+                return;
+            NJA::SocketEvent se;
+            CAutoLock al(pool->m_cs);
+            if (pool->m_push.IsEmpty())
+                return;
+            CUQueue *q = CScopeUQueue::Lock();
+            *q << p->GetCurrentHandler() << reqId << sender;
+            q->Push(pMessage, size);
+            se.QData = q;
+            se.Se = NJA::sePostUserMessageEx;
+            pool->m_deqSocketEvent.push_back(se);
+            int fail = uv_async_send(p->m_asyncType);
+            assert(!fail);
+#else
             CPushImpl &push = p->GetPush();
             if (push.OnSendUserMessageEx)
                 push.OnSendUserMessageEx(p, sender, pMessage, size);
             p->OnSendUserMessageEx(sender, pMessage, size);
+#endif
         }
 
         void CClientSocket::OnAllRequestsProcessed(unsigned short lastRequestId) {
@@ -1153,12 +1299,28 @@ namespace SPA
             CClientSocket *p = Seek(handler);
             if (!p)
                 return;
-            CAsyncServiceHandler *ash = p->Seek(ClientCoreLoader.GetCurrentServiceId(handler));
+            PAsyncServiceHandler ash = p->Seek(ClientCoreLoader.GetCurrentServiceId(handler));
             if (ash)
                 ash->OnAllProcessed();
             if (p->AllRequestsProcessed)
                 p->AllRequestsProcessed(p, lastRequestId);
             p->OnAllRequestsProcessed(lastRequestId);
+#ifdef NODE_JS_ADAPTER_PROJECT
+            NJA::NJSocketPool *pool = (NJA::NJSocketPool *)p->m_asyncType->data;
+            if (!pool)
+                return;
+            NJA::SocketEvent se;
+            CAutoLock al(pool->m_cs);
+            if (pool->m_ap.IsEmpty())
+                return;
+            CUQueue *q = CScopeUQueue::Lock();
+            *q << ash << lastRequestId;
+            se.QData = q;
+            se.Se = NJA::seAllProcessed;
+            pool->m_deqSocketEvent.push_back(se);
+            int fail = uv_async_send(p->m_asyncType);
+            assert(!fail);
+#endif
         }
 
         void WINAPI CClientSocket::OnBaseRequestProcessed(USocket_Client_Handle handler, unsigned short requestId) {
@@ -1171,7 +1333,7 @@ namespace SPA
                 p->m_nCurrSvsId = ClientCoreLoader.GetCurrentServiceId(handler);
                 p->m_routing = ClientCoreLoader.IsRouting(handler);
             }
-            CAsyncServiceHandler *ash = p->Seek(ClientCoreLoader.GetCurrentServiceId(handler));
+            PAsyncServiceHandler ash = p->Seek(ClientCoreLoader.GetCurrentServiceId(handler));
             if (ash) {
                 if (ash->BaseRequestProcessed)
                     ash->BaseRequestProcessed(ash, requestId);
@@ -1182,6 +1344,22 @@ namespace SPA
             if (p->BaseRequestProcessed)
                 p->BaseRequestProcessed(p, requestId);
             p->OnBaseRequestProcessed(requestId);
+#ifdef NODE_JS_ADAPTER_PROJECT
+            NJA::NJSocketPool *pool = (NJA::NJSocketPool *)p->m_asyncType->data;
+            if (!pool)
+                return;
+            NJA::SocketEvent se;
+            CAutoLock al(pool->m_cs);
+            if (pool->m_brp.IsEmpty())
+                return;
+            CUQueue *q = CScopeUQueue::Lock();
+            *q << ash << requestId;
+            se.QData = q;
+            se.Se = NJA::seBaseRequestProcessed;
+            pool->m_deqSocketEvent.push_back(se);
+            int fail = uv_async_send(p->m_asyncType);
+            assert(!fail);
+#endif
         }
 
         void WINAPI CClientSocket::OnServerException(USocket_Client_Handle handler, unsigned short requestId, const wchar_t *errMessage, const char* errWhere, unsigned int errCode) {
@@ -1196,10 +1374,26 @@ namespace SPA
                 p->ExceptionFromServer(p, requestId, errMessage, errWhere, errCode);
 #endif
             }
-            CAsyncServiceHandler *ash = p->Seek(ClientCoreLoader.GetCurrentServiceId(handler));
+            PAsyncServiceHandler ash = p->Seek(ClientCoreLoader.GetCurrentServiceId(handler));
             if (ash)
                 ash->OnSE(requestId, errMessage, errWhere, errCode);
             p->OnExceptionFromServer(requestId, errMessage, errWhere, errCode);
+#ifdef NODE_JS_ADAPTER_PROJECT
+            NJA::NJSocketPool *pool = (NJA::NJSocketPool *)p->m_asyncType->data;
+            if (!pool)
+                return;
+            NJA::SocketEvent se;
+            CAutoLock al(pool->m_cs);
+            if (pool->m_se.IsEmpty())
+                return;
+            CUQueue *q = CScopeUQueue::Lock();
+            *q << ash << requestId << errMessage << errWhere << errCode;
+            se.QData = q;
+            se.Se = NJA::seServerException;
+            pool->m_deqSocketEvent.push_back(se);
+            int fail = uv_async_send(p->m_asyncType);
+            assert(!fail);
+#endif
         }
     }//ClientSide
 }//SPA

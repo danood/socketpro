@@ -891,7 +891,7 @@ namespace SPA
                         info.DeclaredType = L"DECIMAL"; //The maximum number of digits for DECIMAL is 65, but the actual range for a given DECIMAL column can be constrained by the precision or scale for a given column.
                         info.DataType = (VT_I1 | VT_ARRAY); //string
                         info.Scale = (unsigned char) f.decimals;
-                        info.Precision = (unsigned char) f.length;
+                        info.Precision = 29;
                         break;
                     case MYSQL_TYPE_TINY:
                         info.DeclaredType = L"TINYINT";
@@ -1231,7 +1231,7 @@ namespace SPA
                             case (VT_I1 | VT_ARRAY):
                             case (VT_UI1 | VT_ARRAY):
                             {
-                                if (colInfo.Precision && colInfo.Precision <= 19) {
+                                if (colInfo.Precision && colInfo.Precision <= 29) {
                                     DECIMAL dec;
                                     if (len <= 19)
                                         ParseDec(data, dec);
@@ -1866,7 +1866,7 @@ namespace SPA
                                     if (batching) {
                                         StartBatching();
                                     }
-                                } else if (colInfo.Precision && colInfo.Precision <= 19) {
+                                } else if (colInfo.Precision && colInfo.Precision <= 29) {
                                     DECIMAL dec;
                                     if (len <= 19)
                                         ParseDec((const char*) b.buffer, dec);
