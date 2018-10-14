@@ -5,6 +5,12 @@
 #include "udatabase.h"
 #include "aclientw.h"
 
+#ifdef NODE_JS_ADAPTER_PROJECT
+namespace NJA {
+    Local<Array> ToMeta(Isolate* isolate, const SPA::UDB::CDBColumnInfoArray &v);
+}
+#endif
+
 namespace SPA {
     namespace ClientSide {
         using namespace UDB;
@@ -17,27 +23,46 @@ namespace SPA {
         protected:
             //you may use this constructor for extending the class
 
-            CAsyncDBHandler(unsigned int sid, CClientSocket *cs = nullptr)
+            CAsyncDBHandler(unsigned int sid, CClientSocket *cs)
             : CAsyncServiceHandler(sid, cs),
             m_affected(-1), m_dbErrCode(0), m_lastReqId(0),
             m_indexRowset(0), m_indexProc(0), m_ms(msUnknown), m_flags(0),
             m_parameters(0), m_outputs(0), m_bCallReturn(false), m_queueOk(false), m_nParamPos(0) {
                 m_Blob.Utf8ToW(true);
+#ifdef NODE_JS_ADAPTER_PROJECT
+                ::memset(&m_typeDB, 0, sizeof (m_typeDB));
+                m_typeDB.data = this;
+                int fail = uv_async_init(uv_default_loop(), &m_typeDB, req_cb);
+                assert(!fail);
+                m_bProc = false;
+#endif
             }
 
         public:
 
-            CAsyncDBHandler(CClientSocket *cs = nullptr)
+            CAsyncDBHandler(CClientSocket *cs)
             : CAsyncServiceHandler(serviceId, cs),
             m_affected(-1), m_dbErrCode(0), m_lastReqId(0),
             m_indexRowset(0), m_indexProc(0), m_ms(msUnknown), m_flags(0),
             m_parameters(0), m_outputs(0), m_bCallReturn(false), m_queueOk(false), m_nParamPos(0) {
                 m_Blob.Utf8ToW(true);
+#ifdef NODE_JS_ADAPTER_PROJECT
+                ::memset(&m_typeDB, 0, sizeof (m_typeDB));
+                m_typeDB.data = this;
+                int fail = uv_async_init(uv_default_loop(), &m_typeDB, req_cb);
+                assert(!fail);
+                m_bProc = false;
+#endif
             }
 
             virtual ~CAsyncDBHandler() {
                 CleanCallbacks();
+#ifdef NODE_JS_ADAPTER_PROJECT
+                uv_close((uv_handle_t*) & m_typeDB, nullptr);
+#endif
             }
+
+            typedef CAsyncDBHandler* PAsyncDBHandler;
 
             static const unsigned int SQLStreamServiceId = serviceId;
 
@@ -100,6 +125,20 @@ namespace SPA {
                 CAutoLock al(m_csDB);
                 return m_bCallReturn;
             }
+
+#ifdef NODE_JS_ADAPTER_PROJECT
+
+            inline const CDBVariant& GetRetValue() {
+                CAutoLock al(m_csDB);
+                assert(m_bCallReturn);
+                return m_vtRet;
+            }
+
+            inline bool IsProc() {
+                CAutoLock al(m_csDB);
+                return m_bProc;
+            }
+#endif
 
             /**
              * Check if the object will automatically convert utf8 string into Unicode string when loading a ASCII string by VARIANT.
@@ -433,26 +472,27 @@ namespace SPA {
                     }
                 }
                 sb << strConnection << flags;
-                ResultHandler arh = [handler, this](CAsyncResult & ar) {
+                ResultHandler arh = [handler](CAsyncResult & ar) {
                     int res, ms;
                     std::wstring errMsg;
                     ar >> res >> errMsg >> ms;
-                    this->m_csDB.lock();
-                    this->m_dbErrCode = res;
-                    this->m_lastReqId = idOpen;
+                    CAsyncDBHandler<serviceId> *ash = (CAsyncDBHandler<serviceId>*)ar.AsyncServiceHandler;
+                    ash->m_csDB.lock();
+                    ash->m_dbErrCode = res;
+                    ash->m_lastReqId = idOpen;
                     if (res == 0) {
-                        this->m_strConnection = std::move(errMsg);
+                        ash->m_strConnection = std::move(errMsg);
                         errMsg.clear();
                     } else {
-                        this->m_strConnection.clear();
+                        ash->m_strConnection.clear();
                     }
-                    this->m_dbErrMsg = errMsg;
-                    this->m_ms = (tagManagementSystem) ms;
-                    this->m_parameters = 0;
-                    this->m_outputs = 0;
-                    this->m_csDB.unlock();
+                    ash->m_dbErrMsg = errMsg;
+                    ash->m_ms = (tagManagementSystem) ms;
+                    ash->m_parameters = 0;
+                    ash->m_outputs = 0;
+                    ash->m_csDB.unlock();
                     if (handler) {
-                        handler(*this, res, errMsg);
+                        handler(*ash, res, errMsg);
                     }
                 };
                 if (SendRequest(UDB::idOpen, sb->GetBuffer(), sb->GetSize(), arh, discarded, nullptr)) {
@@ -475,22 +515,23 @@ namespace SPA {
              */
             virtual bool Prepare(const wchar_t *sql, DResult handler = nullptr, const CParameterInfoArray& vParameterInfo = CParameterInfoArray(), DDiscarded discarded = nullptr) {
                 CScopeUQueue sb;
-                ResultHandler arh = [handler, this](CAsyncResult & ar) {
+                ResultHandler arh = [handler](CAsyncResult & ar) {
                     int res;
                     std::wstring errMsg;
                     unsigned int parameters;
                     ar >> res >> errMsg >> parameters;
-                    this->m_csDB.lock();
-                    this->m_bCallReturn = false;
-                    this->m_lastReqId = idPrepare;
-                    this->m_dbErrCode = res;
-                    this->m_dbErrMsg = errMsg;
-                    this->m_parameters = (parameters & 0xffff);
-                    this->m_outputs = (parameters >> 16);
-                    this->m_indexProc = 0;
-                    this->m_csDB.unlock();
+                    CAsyncDBHandler<serviceId> *ash = (CAsyncDBHandler<serviceId>*)ar.AsyncServiceHandler;
+                    ash->m_csDB.lock();
+                    ash->m_bCallReturn = false;
+                    ash->m_lastReqId = idPrepare;
+                    ash->m_dbErrCode = res;
+                    ash->m_dbErrMsg = errMsg;
+                    ash->m_parameters = (parameters & 0xffff);
+                    ash->m_outputs = (parameters >> 16);
+                    ash->m_indexProc = 0;
+                    ash->m_csDB.unlock();
                     if (handler) {
-                        handler(*this, res, errMsg);
+                        handler(*ash, res, errMsg);
                     }
                 };
                 sb << sql << vParameterInfo;
@@ -504,18 +545,19 @@ namespace SPA {
              * @return true if request is successfully sent or queued; and false if request is NOT successfully sent or queued
              */
             virtual bool Close(DResult handler = nullptr, DDiscarded discarded = nullptr) {
-                ResultHandler arh = [handler, this](CAsyncResult & ar) {
+                ResultHandler arh = [handler](CAsyncResult & ar) {
                     int res;
                     std::wstring errMsg;
                     ar >> res >> errMsg;
-                    this->m_csDB.lock();
-                    this->m_lastReqId = idClose;
-                    this->m_strConnection.clear();
-                    this->m_dbErrCode = res;
-                    this->m_dbErrMsg = errMsg;
-                    this->m_csDB.unlock();
+                    CAsyncDBHandler<serviceId> *ash = (CAsyncDBHandler<serviceId>*)ar.AsyncServiceHandler;
+                    ash->m_csDB.lock();
+                    ash->m_lastReqId = idClose;
+                    ash->m_strConnection.clear();
+                    ash->m_dbErrCode = res;
+                    ash->m_dbErrMsg = errMsg;
+                    ash->m_csDB.unlock();
                     if (handler) {
-                        handler(*this, res, errMsg);
+                        handler(*ash, res, errMsg);
                     }
                 };
                 return SendRequest(idClose, (const unsigned char*) nullptr, (unsigned int) 0, arh, discarded, nullptr);
@@ -532,22 +574,23 @@ namespace SPA {
                 unsigned int flags;
                 std::wstring connection;
                 CScopeUQueue sb;
-                ResultHandler arh = [handler, this](CAsyncResult & ar) {
+                ResultHandler arh = [handler](CAsyncResult & ar) {
                     int res, ms;
                     std::wstring errMsg;
                     ar >> res >> errMsg >> ms;
-                    this->m_csDB.lock();
+                    CAsyncDBHandler<serviceId> *ash = (CAsyncDBHandler<serviceId>*)ar.AsyncServiceHandler;
+                    ash->m_csDB.lock();
                     if (res == 0) {
-                        this->m_strConnection = errMsg;
+                        ash->m_strConnection = errMsg;
                         errMsg.clear();
                     }
-                    this->m_lastReqId = idBeginTrans;
-                    this->m_dbErrCode = res;
-                    this->m_dbErrMsg = errMsg;
-                    this->m_ms = (tagManagementSystem) ms;
-                    this->m_csDB.unlock();
+                    ash->m_lastReqId = idBeginTrans;
+                    ash->m_dbErrCode = res;
+                    ash->m_dbErrMsg = errMsg;
+                    ash->m_ms = (tagManagementSystem) ms;
+                    ash->m_csDB.unlock();
                     if (handler) {
-                        handler(*this, res, errMsg);
+                        handler(*ash, res, errMsg);
                     }
                 };
 
@@ -579,17 +622,18 @@ namespace SPA {
             virtual bool EndTrans(tagRollbackPlan plan = rpDefault, DResult handler = nullptr, DDiscarded discarded = nullptr) {
                 CScopeUQueue sb;
                 sb << (int) plan;
-                ResultHandler arh = [handler, this](CAsyncResult & ar) {
+                ResultHandler arh = [handler](CAsyncResult & ar) {
                     int res;
                     std::wstring errMsg;
                     ar >> res >> errMsg;
-                    this->m_csDB.lock();
-                    this->m_lastReqId = idEndTrans;
-                    this->m_dbErrCode = res;
-                    this->m_dbErrMsg = errMsg;
-                    this->m_csDB.unlock();
+                    CAsyncDBHandler<serviceId> *ash = (CAsyncDBHandler<serviceId>*)ar.AsyncServiceHandler;
+                    ash->m_csDB.lock();
+                    ash->m_lastReqId = idEndTrans;
+                    ash->m_dbErrCode = res;
+                    ash->m_dbErrMsg = errMsg;
+                    ash->m_csDB.unlock();
                     if (handler) {
-                        handler(*this, res, errMsg);
+                        handler(*ash, res, errMsg);
                     }
                 };
 
@@ -711,6 +755,9 @@ namespace SPA {
                         CDBVariant vt;
                         mc >> vt;
                         CAutoLock al(m_csDB);
+#ifdef NODE_JS_ADAPTER_PROJECT
+                        m_vtRet = vt;
+#endif
                         auto it = m_mapParameterCall.find(m_indexRowset);
                         if (it != m_mapParameterCall.end()) {
                             //crash? make sure that vParam is valid after calling the method Execute
@@ -763,33 +810,52 @@ namespace SPA {
                             assert(mc.GetSize() == 0);
                             if (Utf8ToW)
                                 mc.Utf8ToW(false);
+                            DRows row;
                             if (reqId == idOutputParameter) {
-                                CAutoLock al(m_csDB);
-                                if (m_lastReqId == idSqlBatchHeader) {
-                                    if (!m_indexProc) {
-                                        m_outputs += ((unsigned int) m_vData.size() + (unsigned int) m_bCallReturn);
+                                {
+                                    CAutoLock al(m_csDB);
+#ifdef NODE_JS_ADAPTER_PROJECT
+                                    m_bProc = true;
+                                    auto it0 = m_mapRowset.find(m_indexRowset);
+                                    if (it0 != m_mapRowset.end()) {
+                                        row = it0->second.second;
                                     }
-                                } else {
-                                    if (!m_outputs) {
-                                        m_outputs = ((unsigned int) m_vData.size() + (unsigned int) m_bCallReturn);
+#endif
+                                    if (m_lastReqId == idSqlBatchHeader) {
+                                        if (!m_indexProc) {
+                                            m_outputs += ((unsigned int) m_vData.size() + (unsigned int) m_bCallReturn);
+                                        }
+                                    } else {
+                                        if (!m_outputs) {
+                                            m_outputs = ((unsigned int) m_vData.size() + (unsigned int) m_bCallReturn);
+                                        }
                                     }
+#ifndef NODE_JS_ADAPTER_PROJECT
+                                    auto it = m_mapParameterCall.find(m_indexRowset);
+                                    if (it != m_mapParameterCall.cend()) {
+                                        //crash? make sure that vParam is valid after calling the method Execute
+                                        size_t pos;
+                                        CDBVariantArray &vParam = *(it->second);
+                                        if (m_lastReqId == idSqlBatchHeader)
+                                            pos = m_parameters * m_indexProc + (m_nParamPos & 0xffff) + (m_nParamPos >> 16) - (unsigned int) m_vData.size();
+                                        else
+                                            pos = m_parameters * m_indexProc + m_parameters - (unsigned int) m_vData.size();
+                                        for (auto start = m_vData.begin(), end = m_vData.end(); start != end; ++start, ++pos) {
+                                            vParam[pos] = *start;
+                                        }
+                                    }
+#endif
+                                    ++m_indexProc;
                                 }
-                                auto it = m_mapParameterCall.find(m_indexRowset);
-                                if (it != m_mapParameterCall.cend()) {
-                                    //crash? make sure that vParam is valid after calling the method Execute
-                                    CDBVariantArray &vParam = *(it->second);
-                                    size_t pos;
-                                    if (m_lastReqId == idSqlBatchHeader)
-                                        pos = m_parameters * m_indexProc + (m_nParamPos & 0xffff) + (m_nParamPos >> 16) - (unsigned int) m_vData.size();
-                                    else
-                                        pos = m_parameters * m_indexProc + m_parameters - (unsigned int) m_vData.size();
-                                    for (auto start = m_vData.begin(), end = m_vData.end(); start != end; ++start, ++pos) {
-                                        vParam[pos] = std::move(*start);
-                                    }
+#ifdef NODE_JS_ADAPTER_PROJECT
+                                if (row) {
+                                    row(*this, m_vData);
                                 }
-                                ++m_indexProc;
+                                m_csDB.lock();
+                                m_bProc = false;
+                                m_csDB.unlock();
+#endif
                             } else {
-                                DRows row;
                                 {
                                     CAutoLock al(m_csDB);
                                     auto it = m_mapRowset.find(m_indexRowset);
@@ -851,6 +917,7 @@ namespace SPA {
                 int res;
                 std::wstring errMsg;
                 CDBVariant vtId;
+                CAsyncDBHandler<serviceId> *ash = (CAsyncDBHandler<serviceId>*)ar.AsyncServiceHandler;
                 ar >> affected >> res >> errMsg >> vtId >> fail_ok;
                 {
                     SPA::CAutoLock al(m_csDB);
@@ -868,11 +935,11 @@ namespace SPA {
                     }
                     auto ph = m_mapHandler.find(index);
                     if (ph != m_mapHandler.end()) {
-                        this->m_mapHandler.erase(ph);
+                        ash->m_mapHandler.erase(ph);
                     }
                 }
                 if (handler) {
-                    handler(*this, res, errMsg, affected, fail_ok, vtId);
+                    handler(*ash, res, errMsg, affected, fail_ok, vtId);
                 }
             }
 
@@ -914,6 +981,356 @@ namespace SPA {
             bool m_queueOk;
             std::unordered_map<UINT64, DRowsetHeader> m_mapHandler;
             unsigned int m_nParamPos;
+
+#ifdef NODE_JS_ADAPTER_PROJECT
+            CDBVariant m_vtRet;
+            bool m_bProc;
+
+        public:
+
+            UINT64 BeginTrans(Isolate* isolate, int args, Local<Value> *argv, tagTransactionIsolation isolation) {
+                bool bad;
+                SPA::UINT64 index = GetCallIndex();
+                DResult result;
+                DDiscarded dd;
+                if (args > 0) {
+                    result = GetResult(isolate, argv[0], bad);
+                    if (bad) return 0;
+                }
+                if (args > 1) {
+                    dd = Get(isolate, argv[1], bad);
+                    if (bad) return 0;
+                }
+                return BeginTrans(isolation, result, dd) ? index : INVALID_NUMBER;
+            }
+
+            UINT64 Close(Isolate* isolate, int args, Local<Value> *argv) {
+                bool bad;
+                SPA::UINT64 index = GetCallIndex();
+                DResult result;
+                DDiscarded dd;
+                if (args > 0) {
+                    result = GetResult(isolate, argv[0], bad);
+                    if (bad) return 0;
+                }
+                if (args > 1) {
+                    dd = Get(isolate, argv[1], bad);
+                    if (bad) return 0;
+                }
+                return Close(result, dd) ? index : INVALID_NUMBER;
+            }
+
+            UINT64 EndTrans(Isolate* isolate, int args, Local<Value> *argv, tagRollbackPlan plan) {
+                bool bad;
+                SPA::UINT64 index = GetCallIndex();
+                DResult result;
+                DDiscarded dd;
+                if (args > 0) {
+                    result = GetResult(isolate, argv[0], bad);
+                    if (bad) return 0;
+                }
+                if (args > 1) {
+                    bool bad;
+                    dd = Get(isolate, argv[1], bad);
+                    if (bad) return 0;
+                }
+                return EndTrans(plan, result, dd) ? index : INVALID_NUMBER;
+            }
+
+            UINT64 Execute(Isolate* isolate, int args, Local<Value> *argv, CDBVariantArray &vParam) {
+                bool bad;
+                SPA::UINT64 index = GetCallIndex();
+                DExecuteResult result;
+                DDiscarded dd;
+                DRows r;
+                DRowsetHeader rh;
+                if (args > 0) {
+                    result = GetExecuteResult(isolate, argv[0], bad);
+                    if (bad) return 0;
+                }
+                if (args > 1) {
+                    r = GetRows(isolate, argv[1], bad);
+                    if (bad) return 0;
+                }
+                if (args > 2) {
+                    rh = GetRowsetHeader(isolate, argv[2], bad);
+                    if (bad) return 0;
+                }
+                if (args > 3) {
+                    dd = Get(isolate, argv[3], bad);
+                    if (bad) return 0;
+                }
+                return Execute(vParam, result, r, rh, true, true, dd) ? index : INVALID_NUMBER;
+            }
+
+            UINT64 Execute(Isolate* isolate, int args, Local<Value> *argv, const wchar_t *sql) {
+                bool bad;
+                SPA::UINT64 index = GetCallIndex();
+                DExecuteResult result;
+                DDiscarded dd;
+                DRows r;
+                DRowsetHeader rh;
+                if (args > 0) {
+                    result = GetExecuteResult(isolate, argv[0], bad);
+                    if (bad) return 0;
+                }
+                if (args > 1) {
+                    r = GetRows(isolate, argv[1], bad);
+                    if (bad) return 0;
+                }
+                if (args > 2) {
+                    rh = GetRowsetHeader(isolate, argv[2], bad);
+                    if (bad) return 0;
+                }
+                if (args > 3) {
+                    dd = Get(isolate, argv[3], bad);
+                    if (bad) return 0;
+                }
+                return Execute(sql, result, r, rh, true, true, dd) ? index : INVALID_NUMBER;
+            }
+
+            UINT64 ExecuteBatch(Isolate* isolate, int args, Local<Value> *argv, tagTransactionIsolation isolation, const wchar_t *sql, CDBVariantArray &vParam, tagRollbackPlan plan, const wchar_t *delimiter, const CParameterInfoArray& vPInfo) {
+                bool bad;
+                SPA::UINT64 index = GetCallIndex();
+                DExecuteResult result;
+                DDiscarded dd;
+                DRows r;
+                DRowsetHeader rh;
+                DRowsetHeader bh;
+                if (args > 0) {
+                    result = GetExecuteResult(isolate, argv[0], bad);
+                    if (bad) return 0;
+                }
+                if (args > 1) {
+                    r = GetRows(isolate, argv[1], bad);
+                    if (bad) return 0;
+                }
+                if (args > 2) {
+                    rh = GetRowsetHeader(isolate, argv[2], bad);
+                    if (bad) return 0;
+                }
+                if (args > 3) {
+                    bh = GetBatchHeader(isolate, argv[3], bad);
+                    if (bad) return 0;
+                }
+                if (args > 4) {
+                    dd = Get(isolate, argv[4], bad);
+                    if (bad) return 0;
+                }
+                return ExecuteBatch(isolation, sql, vParam, result, r, rh, bh, vPInfo, plan, dd, delimiter) ? index : INVALID_NUMBER;
+            }
+
+            UINT64 Open(Isolate* isolate, int args, Local<Value> *argv, const wchar_t* strConnection, unsigned int flags) {
+                bool bad;
+                SPA::UINT64 index = GetCallIndex();
+                DResult result;
+                DDiscarded dd;
+                if (args > 0) {
+                    result = GetResult(isolate, argv[0], bad);
+                    if (bad) return 0;
+                }
+                if (args > 1) {
+                    dd = Get(isolate, argv[1], bad);
+                    if (bad) return 0;
+                }
+                return Open(strConnection, result, flags, dd) ? index : INVALID_NUMBER;
+            }
+
+            UINT64 Prepare(Isolate* isolate, int args, Local<Value> *argv, const wchar_t *sql, const CParameterInfoArray& vParameterInfo) {
+                bool bad;
+                SPA::UINT64 index = GetCallIndex();
+                DResult result;
+                DDiscarded dd;
+                if (args > 0) {
+                    result = GetResult(isolate, argv[0], bad);
+                    if (bad) return 0;
+                }
+                if (args > 1) {
+                    dd = Get(isolate, argv[1], bad);
+                    if (bad) return 0;
+                }
+                return Prepare(sql, result, vParameterInfo, dd) ? index : INVALID_NUMBER;
+            }
+
+        protected:
+
+            enum tagDBEvent {
+                eResult = 0,
+                eExecuteResult,
+                eRowsetHeader,
+                eRows,
+                eBatchHeader,
+                eDiscarded
+            };
+
+            struct DBCb {
+                tagDBEvent Type;
+                PUQueue Buffer;
+                std::shared_ptr<CNJFunc> Func;
+                std::shared_ptr<CDBVariantArray> VData;
+            };
+
+            std::deque<DBCb> m_deqDBCb; //protected by m_csDB;
+            uv_async_t m_typeDB; //DB request events
+
+            DRowsetHeader GetBatchHeader(Isolate* isolate, Local<Value> header, bool &bad) {
+                bad = false;
+                DRowsetHeader rh;
+                if (header->IsFunction()) {
+                    std::shared_ptr<CNJFunc> func(new CNJFunc);
+                    func->Reset(isolate, Local<Function>::Cast(header));
+                    rh = [func](CAsyncDBHandler & db) {
+                        DBCb cb;
+                        cb.Type = eBatchHeader;
+                        cb.Func = func;
+                        cb.Buffer = CScopeUQueue::Lock();
+                        PAsyncDBHandler ash = &db;
+                        *cb.Buffer << ash;
+                        CAutoLock al(ash->m_csDB);
+                        ash->m_deqDBCb.push_back(cb);
+                        int fail = uv_async_send(&ash->m_typeDB);
+                        assert(!fail);
+                    };
+                } else if (!header->IsNullOrUndefined()) {
+                    NJA::ThrowException(isolate, "A callback expected for batch header");
+                    bad = true;
+                }
+                return rh;
+            }
+
+            DRowsetHeader GetRowsetHeader(Isolate* isolate, Local<Value> header, bool &bad) {
+                bad = false;
+                DRowsetHeader rh;
+                if (header->IsFunction()) {
+                    std::shared_ptr<CNJFunc> func(new CNJFunc);
+                    func->Reset(isolate, Local<Function>::Cast(header));
+                    rh = [func](CAsyncDBHandler & db) {
+                        DBCb cb;
+                        cb.Type = eRowsetHeader;
+                        cb.Func = func;
+                        cb.Buffer = CScopeUQueue::Lock();
+                        PAsyncDBHandler ash = &db;
+                        *cb.Buffer << ash << db.GetColumnInfo();
+                        CAutoLock al(ash->m_csDB);
+                        ash->m_deqDBCb.push_back(cb);
+                        int fail = uv_async_send(&ash->m_typeDB);
+                        assert(!fail);
+                    };
+                } else if (!header->IsNullOrUndefined()) {
+                    NJA::ThrowException(isolate, "A callback expected for record meta");
+                    bad = true;
+                }
+                return rh;
+            }
+
+            DRows GetRows(Isolate* isolate, Local<Value> r, bool &bad) {
+                bad = false;
+                DRows rows;
+                if (r->IsFunction()) {
+                    std::shared_ptr<CNJFunc> func(new CNJFunc);
+                    func->Reset(isolate, Local<Function>::Cast(r));
+                    rows = [func](CAsyncDBHandler &db, CDBVariantArray & vData) {
+                        DBCb cb;
+                        cb.Type = eRows;
+                        cb.Func = func;
+                        cb.Buffer = CScopeUQueue::Lock();
+                        cb.VData.reset(new CDBVariantArray);
+                        vData.swap(*cb.VData);
+                        PAsyncDBHandler ash = &db;
+                        bool proc = db.IsProc();
+                        if (proc && db.GetCallReturn())
+                            cb.VData->insert(cb.VData->begin(), db.GetRetValue());
+                        *cb.Buffer << ash << proc;
+                        CAutoLock al(ash->m_csDB);
+                        ash->m_deqDBCb.push_back(cb);
+                        int fail = uv_async_send(&ash->m_typeDB);
+                        assert(!fail);
+                    };
+                } else if (!r->IsNullOrUndefined()) {
+                    NJA::ThrowException(isolate, "A callback expected for row data");
+                    bad = true;
+                }
+                return rows;
+            }
+
+            DExecuteResult GetExecuteResult(Isolate* isolate, Local<Value> er, bool &bad) {
+                bad = false;
+                DExecuteResult result;
+                if (er->IsFunction()) {
+                    std::shared_ptr<CNJFunc> func(new CNJFunc);
+                    func->Reset(isolate, Local<Function>::Cast(er));
+                    result = [func](CAsyncDBHandler &db, int errCode, const std::wstring &errMsg, INT64 affected, UINT64 fail_ok, CDBVariant & vtId) {
+                        DBCb cb;
+                        cb.Type = eExecuteResult;
+                        cb.Func = func;
+                        cb.Buffer = CScopeUQueue::Lock();
+                        PAsyncDBHandler ash = &db;
+                        *cb.Buffer << ash << errCode << errMsg << affected << fail_ok << vtId;
+                        CAutoLock al(ash->m_csDB);
+                        ash->m_deqDBCb.push_back(cb);
+                        int fail = uv_async_send(&ash->m_typeDB);
+                        assert(!fail);
+                    };
+                } else if (!er->IsNullOrUndefined()) {
+                    NJA::ThrowException(isolate, "A callback expected for Execute end result");
+                    bad = true;
+                }
+                return result;
+            }
+
+            DResult GetResult(Isolate* isolate, Local<Value> res, bool &bad) {
+                bad = false;
+                DResult result;
+                if (res->IsFunction()) {
+                    std::shared_ptr<CNJFunc> func(new CNJFunc);
+                    func->Reset(isolate, Local<Function>::Cast(res));
+                    result = [func](CAsyncDBHandler &db, int errCode, const std::wstring & errMsg) {
+                        DBCb cb;
+                        cb.Type = eResult;
+                        cb.Func = func;
+                        cb.Buffer = CScopeUQueue::Lock();
+                        PAsyncDBHandler ash = &db;
+                        *cb.Buffer << ash << errCode << errMsg;
+                        CAutoLock al(ash->m_csDB);
+                        ash->m_deqDBCb.push_back(cb);
+                        int fail = uv_async_send(&ash->m_typeDB);
+                        assert(!fail);
+                    };
+                } else if (!res->IsNullOrUndefined()) {
+                    NJA::ThrowException(isolate, "A callback expected for end result");
+                    bad = true;
+                }
+                return result;
+            }
+
+            DDiscarded Get(Isolate* isolate, Local<Value> abort, bool &bad) {
+                bad = false;
+                DDiscarded dd;
+                if (abort->IsFunction()) {
+                    std::shared_ptr<CNJFunc> func(new CNJFunc);
+                    func->Reset(isolate, Local<Function>::Cast(abort));
+                    dd = [func](CAsyncServiceHandler *db, bool canceled) {
+                        DBCb cb;
+                        cb.Type = eDiscarded;
+                        cb.Func = func;
+                        cb.Buffer = CScopeUQueue::Lock();
+                        PAsyncDBHandler ash = (PAsyncDBHandler) db;
+                        *cb.Buffer << ash << canceled;
+                        CAutoLock al(ash->m_csDB);
+                        ash->m_deqDBCb.push_back(cb);
+                        int fail = uv_async_send(&ash->m_typeDB);
+                        assert(!fail);
+                    };
+                } else if (!abort->IsNullOrUndefined()) {
+                    NJA::ThrowException(isolate, "A callback expected for tracking socket closed or canceled events");
+                    bad = true;
+                }
+                return dd;
+            }
+
+        private:
+            static void req_cb(uv_async_t* handle);
+#endif
         };
     } //namespace ClientSide
 } //namespace SPA
