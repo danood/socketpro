@@ -12,17 +12,17 @@ var config = {
 		]
 	},
 	slave:{
-		sessions:2,
+		sessions:6,
 		queueName:'qslave',
-		hosts:[	{	host:'10.16.20.33',
+		hosts:[	{host:'10.16.20.33',
 				port:20902,
 				uid:'root',
 				pwd:'Smash123'
-			}, {	host:'ws-yye-1',
+			}, {host:'ws-yye-1',
 				port:20902,
 				uid:'root',
 				pwd:'Smash123'
-			}, {	host:'104.154.160.127',
+			}, {host:'52.25.161.158',
 				port:20902,
 				uid:'root',
 				pwd:'Smash123',
@@ -39,7 +39,7 @@ exports.spa = SPA;
 var cs = SPA.CS; //CS == Client side
 
 //set working directory for client message queues
-cs.Queue.setWorkingDir(config.work_dir);
+cs.Queue.WorkingDir = config.work_dir;
 
 function getCCs(hosts) {
 	var ccs = [];
@@ -52,26 +52,25 @@ function getCCs(hosts) {
 
 //create a global socket pool object for master
 var master=cs.newPool(SPA.SID.sidMysql, config.defaultDb); //or sidOdbc for MS SQL Server
-master.setQueueName(config.master.queueName);
+master.QueueName = config.master.queueName;
 exports.master = master;
 
 //start a socket pool to one or more remote master servers
 if (!master.Start(getCCs(config.master.hosts), config.master.sessions)) {
 	console.log('Master pool starting error');
-	console.log(master.getError());
+	console.log(master.Error);
 }
-exports.getCache = function() {return master.getCache();}
-master.setAutoMerge(false); //no auto merge for persistent message queue
+exports.Cache = master.Cache;
+master.AutoMerge = false; //no auto merge for persistent message queue
 
 //create a global socket pool object for slave
 var slave = master.NewSlave();
-slave.setQueueName(config.slave.queueName);
-slave.setAutoMerge(false);
+slave.QueueName = config.slave.queueName;
 exports.slave = slave;
 
 //start a socket pool having four sessions to remote slave servers
 if (!slave.Start(getCCs(config.slave.hosts), config.slave.sessions)) {
 	console.log('Slave pool starting error');
-	console.log(slave.getError());
+	console.log(slave.Error);
 }
-slave.setAutoMerge(config.slave.hosts.length > 1);
+slave.AutoMerge = (config.slave.hosts.length > 1);
